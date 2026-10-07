@@ -26,6 +26,10 @@ const CANDIDATES = 3000;
 // With the language hard filter on, many candidates are dropped after phase 1,
 // so take a deeper slice
 const CANDIDATES_FILTERED = 10000;
+// How much a title's fame (0..1 percentile, services/tmdbPopularity.js) can
+// lift it past more literal text matches. bm25 scores here run about -5..-20,
+// so this nudges near-equal matches without burying the right one.
+const FAME_WEIGHT = 3;
 
 // year:/date:/released: filters (not FTS columns - applied to the computed year)
 const YEAR_FIELDS = new Set(['year', 'date', 'released', 'release']);
@@ -302,6 +306,7 @@ class SearchIndex {
                     COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
                     ${YEAR_SQL} AS release_year,
                     m.vote_average AS tmdb_rating,
+                    m.fame AS tmdb_fame,
                     h.score AS score
                 FROM hits h
                 JOIN playlist_items p ON p.rowid = h.rowid
@@ -311,7 +316,11 @@ class SearchIndex {
                 ORDER BY
                     CASE WHEN @title <> '' AND instr(lower(p.name), @title) > 0 THEN 0 ELSE 1 END,
                     CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END,
-                    h.score
+                    -- Only fields searched (cast:, director:, genre:, ...): every hit
+                    -- matches about equally, so the best-known titles lead.
+                    -- With plain words, relevance leads and fame nudges.
+                    CASE WHEN @title = '' THEN -IFNULL(m.fame, 0) ELSE 0 END,
+                    h.score - ${FAME_WEIGHT} * IFNULL(m.fame, 0)
                 LIMIT @limit OFFSET @offset
             `).all({ ...params, match: `(${parsed.match}) AND (ftype : "type${type}")` });
         } else {
@@ -322,6 +331,7 @@ class SearchIndex {
                     COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
                     ${YEAR_SQL} AS release_year,
                     m.vote_average AS tmdb_rating,
+                    m.fame AS tmdb_fame,
                     0 AS score
                 FROM playlist_items p
                 ${CATEGORY_JOIN}

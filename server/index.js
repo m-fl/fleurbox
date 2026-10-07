@@ -228,6 +228,7 @@ app.listen(PORT, async () => {
     try {
         require('./services/tmdbSync').resumeIfInterrupted();
         require('./services/tmdbTrending').start();
+        require('./services/tmdbPopularity').start();
     } catch (err) {
         console.error('[TMDB] Resume check failed:', err);
     }

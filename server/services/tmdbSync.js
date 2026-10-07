@@ -20,6 +20,7 @@
  */
 
 const { getDb } = require('../db/sqlite');
+const tmdbStats = require('./tmdbStats');
 
 const API_BASE = 'https://api.themoviedb.org/3';
 const REQUESTS_PER_SECOND = 10;           // cap on request starts (TMDB ceiling ~40)
@@ -88,6 +89,11 @@ class TmdbSync {
                 json TEXT NOT NULL
             );
         `);
+        // Added later: how well known a title is (see services/tmdbPopularity.js)
+        const columns = new Set(getDb().prepare('PRAGMA table_info(tmdb_meta)').all().map(c => c.name));
+        for (const [name, type] of [['popularity', 'REAL'], ['vote_count', 'INTEGER'], ['fame', 'REAL']]) {
+            if (!columns.has(name)) getDb().exec(`ALTER TABLE tmdb_meta ADD COLUMN ${name} ${type}`);
+        }
         this.tablesReady = true;
     }
 
@@ -296,6 +302,7 @@ class TmdbSync {
             const sentAt = Date.now();
             let res;
             try {
+                tmdbStats.record('details');
                 res = await fetch(url, {
                     headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
                     signal: AbortSignal.timeout(20000)
@@ -358,12 +365,13 @@ class TmdbSync {
 
         getDb().prepare(`
             INSERT INTO tmdb_meta (kind, tmdb_id, status, title, overview, tagline, genres, runtime,
-                                   release_date, vote_average, directors, cast_names, fetched_at)
-            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   release_date, vote_average, vote_count, popularity, directors, cast_names, fetched_at)
+            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(kind, tmdb_id) DO UPDATE SET
                 status = 'ok', title = excluded.title, overview = excluded.overview,
                 tagline = excluded.tagline, genres = excluded.genres, runtime = excluded.runtime,
                 release_date = excluded.release_date, vote_average = excluded.vote_average,
+                vote_count = excluded.vote_count, popularity = excluded.popularity,
                 directors = excluded.directors, cast_names = excluded.cast_names, fetched_at = excluded.fetched_at
         `).run(
             kind, String(tmdbId),
@@ -374,6 +382,8 @@ class TmdbSync {
             runtime || null,
             d.release_date || d.first_air_date || null,
             typeof d.vote_average === 'number' ? d.vote_average : null,
+            typeof d.vote_count === 'number' ? d.vote_count : null,
+            typeof d.popularity === 'number' ? d.popularity : null,
             directors.join(', ') || null,
             cast.join(', ') || null,
             Math.floor(Date.now() / 1000)

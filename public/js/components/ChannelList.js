@@ -38,16 +38,12 @@ class ChannelList {
     }
 
     /**
-     * Get proxied image URL to avoid mixed content errors on HTTPS
-     * Only proxies HTTP URLs when on HTTPS page
+     * Channel logo URL through the server's image cache (API.imageUrl), so each
+     * logo is fetched from its host once; also avoids mixed content on HTTPS
      */
     getProxiedImageUrl(url) {
         if (!url || url.length === 0) return '/img/placeholder.png';
-        // Only proxy if we're on HTTPS and the image is HTTP
-        if (window.location.protocol === 'https:' && url.startsWith('http://')) {
-            return `/api/proxy/image?url=${encodeURIComponent(url)}`;
-        }
-        return url;
+        return API.imageUrl(url);
     }
 
     /**

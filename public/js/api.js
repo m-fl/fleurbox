@@ -12,11 +12,15 @@ const API = {
     },
 
     /**
-     * Image URL safe for this page: plain-http images go through the server's
-     * image proxy when the page is HTTPS
+     * Image URL for this page: every external image (TMDB posters, provider
+     * logos) goes through the server's image proxy, which keeps it on disk -
+     * so each one is downloaded from its source once, not on every view or
+     * device. Also avoids mixed content on HTTPS pages.
      */
     imageUrl(url) {
-        return API.isMixedContent(url) ? `/api/proxy/image?url=${encodeURIComponent(url)}` : url;
+        return typeof url === 'string' && /^https?:\/\//i.test(url)
+            ? `/api/proxy/image?url=${encodeURIComponent(url)}`
+            : url;
     },
 
     /**

@@ -270,7 +270,7 @@ router.delete('/taste', (req, res) => {
 });
 
 /**
- * GET /api/home/for-you -> { profile, rows: [{ id, title, emoji, items }], pending }
+ * GET /api/home/for-you -> { profile, rows: [{ id, title, items }], pending }
  * pending: TMDB popularity lists are still being fetched in the background;
  * ask again shortly for better-ranked rows.
  */

@@ -90,7 +90,7 @@ class TasteQuiz {
                 <div class="quiz-tiles">
                     ${this.catalog.genres.map(g => `
                         <button class="quiz-tile" data-kind="genres" data-id="${g.id}">
-                            <span class="quiz-tile-emoji">${g.emoji || ''}</span>
+                            <span class="quiz-tile-icon">${Icons.line(g.icon)}</span>
                             <span class="quiz-tile-label">${TasteQuiz.escape(g.label)}</span>
                             <span class="quiz-tile-order"></span>
                         </button>`).join('')}

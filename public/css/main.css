@@ -5408,8 +5408,55 @@ kbd {
   opacity: 0;
 }
 
-.rail-collapse,
-.stage-close {
+/* Our own clear button replaces the browser's (blue, tiny) one */
+.rail-search input::-webkit-search-cancel-button,
+.stage-input-wrap input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-light);
+  border-radius: 50%;
+  background: var(--color-bg-active);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.search-clear-btn svg {
+  width: 100%;
+  height: 100%;
+}
+
+.search-clear-btn:hover,
+.search-clear-btn:focus-visible {
+  background: var(--color-accent);
+  border-color: var(--color-accent-border);
+  color: #fff;
+  outline: none;
+}
+
+.search-clear-btn:active {
+  transform: scale(0.9);
+}
+
+/* Only while there is something to clear */
+.rail-search input:placeholder-shown ~ .search-clear-btn,
+.stage-input-wrap input:placeholder-shown ~ .search-clear-btn {
+  display: none;
+}
+
+.rail-collapse {
   flex: 0 0 auto;
   width: 34px;
   height: 34px;
@@ -5424,16 +5471,61 @@ kbd {
   transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-normal);
 }
 
-.rail-collapse svg,
-.stage-close svg {
+.rail-collapse svg {
   width: 20px;
   height: 20px;
 }
 
-.rail-collapse:hover,
-.stage-close:hover {
+.rail-collapse:hover {
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
+}
+
+/* Close the search panel: a clear, bordered pill ("x Close Esc") */
+.stage-close {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.stage-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.stage-close kbd {
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-muted);
+  font: 500 0.7rem/1.5 inherit;
+}
+
+.stage-close:hover,
+.stage-close:focus-visible {
+  background: var(--color-bg-hover);
+  border-color: var(--color-accent-border);
+  color: var(--color-text-primary);
+  box-shadow: 0 0 0 3px rgba(var(--color-accent-rgb), 0.18);
+  outline: none;
+}
+
+.stage-close:hover kbd {
+  color: var(--color-text-secondary);
 }
 
 .rail-search-mini {
@@ -6284,10 +6376,6 @@ kbd {
   animation-delay: calc(var(--r, 0) * 70ms);
 }
 
-.row-emoji {
-  margin-right: 8px;
-}
-
 /* Plot on hover (desktop) */
 .card-peek {
   position: absolute;
@@ -6460,14 +6548,26 @@ kbd {
   box-shadow: 0 0 0 1px var(--color-accent-border), var(--shadow-glow);
 }
 
-.quiz-tile-emoji {
-  font-size: 1.7rem;
-  line-height: 1;
-  transition: transform 200ms cubic-bezier(0.3, 1.6, 0.5, 1);
+.quiz-tile-icon {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  color: var(--color-text-muted);
+  transition: transform 200ms cubic-bezier(0.3, 1.6, 0.5, 1), color 160ms ease;
 }
 
-.quiz-tile.selected .quiz-tile-emoji {
-  transform: scale(1.18) rotate(-6deg);
+.quiz-tile-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.quiz-tile:hover .quiz-tile-icon {
+  color: var(--color-text-secondary);
+}
+
+.quiz-tile.selected .quiz-tile-icon {
+  color: var(--color-accent-text);
+  transform: scale(1.12) rotate(-6deg);
 }
 
 .quiz-tile-label {
@@ -6780,6 +6880,23 @@ kbd {
 
   .stage-input-wrap {
     visibility: visible;
+  }
+
+  .stage-close {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .stage-close span,
+  .stage-close kbd {
+    display: none;
+  }
+
+  .stage-close svg {
+    width: 16px;
+    height: 16px;
   }
 
   .stage-scopes {

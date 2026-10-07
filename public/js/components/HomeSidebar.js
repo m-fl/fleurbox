@@ -41,6 +41,7 @@ class HomeSidebar {
 
     /** Sidebar + stage markup, placed by HomePage.renderLayout() */
     static markup() {
+        const closeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
         const searchIcon = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>';
         return {
             sidebar: `
@@ -51,6 +52,7 @@ class HomeSidebar {
                             <input type="search" id="rail-search-input" placeholder="Search everything"
                                 enterkeyhint="search" aria-label="Search titles, actors, channels">
                             <kbd class="rail-kbd">/</kbd>
+                            <button type="button" class="search-clear-btn" data-clear title="Clear search" aria-label="Clear search">${closeIcon}</button>
                         </form>
                         <button class="rail-collapse" id="rail-collapse" title="Collapse sidebar" aria-label="Collapse sidebar">
                             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
@@ -76,9 +78,10 @@ class HomeSidebar {
                             <span class="rail-search-icon">${searchIcon}</span>
                             <input type="search" id="stage-search-input" placeholder="Search everything"
                                 enterkeyhint="search" aria-label="Search">
+                            <button type="button" class="search-clear-btn" data-clear title="Clear search" aria-label="Clear search">${closeIcon}</button>
                         </div>
-                        <button class="stage-close" id="stage-close" aria-label="Close search">
-                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                        <button class="stage-close" id="stage-close" title="Close search (Esc)" aria-label="Close search">
+                            ${closeIcon}<span>Close</span><kbd>Esc</kbd>
                         </button>
                     </div>
                     <div class="stage-scopes" id="stage-scopes"></div>
@@ -112,6 +115,16 @@ class HomeSidebar {
             this.app.navigateTo('live');
         });
         document.getElementById('stage-close')?.addEventListener('click', () => this.closeStage());
+        // Clear (x) inside either box: empty both, back to recent searches/ideas
+        document.querySelectorAll('#home-rail [data-clear], #search-stage [data-clear]').forEach(btn => {
+            btn.addEventListener('mousedown', e => e.preventDefault()); // keep focus in the box
+            btn.addEventListener('click', () => {
+                clearTimeout(this.searchTimer);
+                this.input.value = this.stageInput.value = '';
+                this.run();
+                (this.isPhone() ? this.stageInput : this.input).focus();
+            });
+        });
 
         // Both inputs drive the same search; the stage one is for phones,
         // where the sidebar drawer closes once results show
@@ -608,20 +621,21 @@ class HomeSidebar {
 
     /**
      * How well a result's title matches the typed words: exact title >
-     * starts with them > contains them. TMDB rating breaks ties, so the
-     * series "South Park" (8.3) beats the movie special "South Park: The
-     * Streaming Wars", and Fargo the series beats Fargo the movie.
+     * starts with them > contains them. Then how well known the title is
+     * (tmdb_fame, its popularity percentile among the library's movies or
+     * series), with the rating as a last tie-break. So the series "South
+     * Park" beats the special "South Park: The Streaming Wars", and
+     * cast:"tom hanks" leads with Forrest Gump, not a niche documentary.
      */
     titleScore(item, words) {
         const title = this.plainTitle(item.name);
-        const rating = Number(item.tmdb_rating) || 0;
         let score = 0;
         if (words) {
             if (title === words) score = 100;
             else if (title.startsWith(words)) score = 60;
             else if (title.includes(words)) score = 30;
         }
-        return score + rating;
+        return score + 20 * (Number(item.tmdb_fame) || 0) + (Number(item.tmdb_rating) || 0) / 10;
     }
 
     /**

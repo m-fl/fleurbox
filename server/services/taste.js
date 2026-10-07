@@ -7,6 +7,7 @@
  *    no Horror/Thriller/Romance, combined "Sci-Fi & Fantasy" etc.), with TMDB
  *    keywords standing in where TV has no such genre. `names` match the stored
  *    `tmdb_meta.genres` text for the local fallback.
+ *    `icon` names a line icon in public/js/icons.js (Icons.line).
  *  - motifs: TMDB keyword names (resolved to ids by tmdbDiscover) plus plain
  *    `words` matched against stored plots for the local fallback.
  *
@@ -23,20 +24,20 @@ const languages = require('./languages');
 
 const CATALOG = {
     genres: [
-        { id: 'action', label: 'Action & Adventure', emoji: '💥', movie: [28, 12], tv: [10759], names: ['Action', 'Adventure'] },
-        { id: 'comedy', label: 'Comedy', emoji: '😂', movie: [35], tv: [35], names: ['Comedy'] },
-        { id: 'suspense', label: 'Mystery & Suspense', emoji: '🕵️', movie: [9648, 53], tv: [9648], names: ['Mystery', 'Thriller'] },
-        { id: 'crime', label: 'Crime', emoji: '🚔', movie: [80], tv: [80], names: ['Crime'] },
-        { id: 'scifi', label: 'Sci-Fi', emoji: '🚀', movie: [878], tv: [10765], names: ['Science Fiction', 'Sci-Fi'] },
-        { id: 'fantasy', label: 'Fantasy', emoji: '🐉', movie: [14], tv: [10765], names: ['Fantasy'] },
-        { id: 'horror', label: 'Horror', emoji: '👻', movie: [27], tvKeywords: ['horror', 'supernatural'], names: ['Horror'] },
-        { id: 'drama', label: 'Drama', emoji: '🎭', movie: [18], tv: [18], names: ['Drama'] },
-        { id: 'romance', label: 'Romance', emoji: '💘', movie: [10749], tvKeywords: ['romance'], names: ['Romance'] },
-        { id: 'documentary', label: 'Documentary', emoji: '🎥', movie: [99], tv: [99], names: ['Documentary'] },
-        { id: 'animation', label: 'Animation', emoji: '✏️', movie: [16], tv: [16], names: ['Animation'] },
-        { id: 'family', label: 'Family & Kids', emoji: '🧸', movie: [10751], tv: [10751, 10762], names: ['Family', 'Kids'] },
-        { id: 'history', label: 'History & War', emoji: '⚔️', movie: [36, 10752], tv: [10768], names: ['History', 'War'] },
-        { id: 'reality', label: 'Reality', emoji: '📺', tv: [10764], names: ['Reality'] }
+        { id: 'action', label: 'Action & Adventure', icon: 'zap', movie: [28, 12], tv: [10759], names: ['Action', 'Adventure'] },
+        { id: 'comedy', label: 'Comedy', icon: 'laugh', movie: [35], tv: [35], names: ['Comedy'] },
+        { id: 'suspense', label: 'Mystery & Suspense', icon: 'eye', movie: [9648, 53], tv: [9648], names: ['Mystery', 'Thriller'] },
+        { id: 'crime', label: 'Crime', icon: 'siren', movie: [80], tv: [80], names: ['Crime'] },
+        { id: 'scifi', label: 'Sci-Fi', icon: 'rocket', movie: [878], tv: [10765], names: ['Science Fiction', 'Sci-Fi'] },
+        { id: 'fantasy', label: 'Fantasy', icon: 'wand-sparkles', movie: [14], tv: [10765], names: ['Fantasy'] },
+        { id: 'horror', label: 'Horror', icon: 'ghost', movie: [27], tvKeywords: ['horror', 'supernatural'], names: ['Horror'] },
+        { id: 'drama', label: 'Drama', icon: 'drama', movie: [18], tv: [18], names: ['Drama'] },
+        { id: 'romance', label: 'Romance', icon: 'heart', movie: [10749], tvKeywords: ['romance'], names: ['Romance'] },
+        { id: 'documentary', label: 'Documentary', icon: 'video', movie: [99], tv: [99], names: ['Documentary'] },
+        { id: 'animation', label: 'Animation', icon: 'palette', movie: [16], tv: [16], names: ['Animation'] },
+        { id: 'family', label: 'Family & Kids', icon: 'users', movie: [10751], tv: [10751, 10762], names: ['Family', 'Kids'] },
+        { id: 'history', label: 'History & War', icon: 'landmark', movie: [36, 10752], tv: [10768], names: ['History', 'War'] },
+        { id: 'reality', label: 'Reality', icon: 'tv', tv: [10764], names: ['Reality'] }
     ],
     motifs: [
         { id: 'heist', label: 'Heists & Cons', keywords: ['heist', 'con artist'], words: ['heist', 'robbery', 'con artist', 'con man'] },
@@ -282,7 +283,7 @@ function interleave(lists) {
 /**
  * Build the user's rows: "Top picks" (this week's trending in their genres),
  * then genres and motifs alternating. A title appears in one row only.
- * Returns { rows: [{ id, title, subtitle, items }], pending }.
+ * Returns { rows: [{ id, title, items }], pending }.
  */
 async function forYou(user, { settings, sourceIds }) {
     const profile = getProfile(user.id);
@@ -317,7 +318,6 @@ async function forYou(user, { settings, sourceIds }) {
         plans.push({
             id: `${motif ? 'motif' : 'genre'}-${src.id}`,
             title: motif ? `Because you're into ${src.label}` : `Trending in ${src.label}`,
-            emoji: src.emoji || null,
             perKind
         });
     }
@@ -361,7 +361,7 @@ async function forYou(user, { settings, sourceIds }) {
     }
     for (const plan of plans) {
         const items = interleave(kinds.map(kind => take(kind, plan.perKind[kind]))).slice(0, ROW_SIZE);
-        if (items.length >= 3) rows.push({ id: plan.id, title: plan.title, emoji: plan.emoji, items });
+        if (items.length >= 3) rows.push({ id: plan.id, title: plan.title, items });
     }
 
     return { profile, rows, pending: pending || tmdbDiscover.busy() };

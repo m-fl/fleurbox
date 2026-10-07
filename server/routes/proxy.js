@@ -13,6 +13,7 @@ const https = require('https');
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { Readable } = require('stream');
+const imageCache = require('../services/imageCache');
 
 // Default cache max age in hours
 const DEFAULT_MAX_AGE_HOURS = 24;
@@ -873,46 +874,33 @@ router.get('/stream', async (req, res) => {
 });
 
 /**
- * Proxy images (channel logos, posters)
- * Fixes mixed content errors when loading HTTP images on HTTPS pages
+ * Proxy images (posters, channel logos) through the disk cache
+ * (services/imageCache.js): each image is downloaded once - TMDB's kept for
+ * good, others re-checked monthly - and browsers may cache it too. Also fixes
+ * mixed content (plain-http images on an HTTPS page).
  * GET /api/proxy/image?url=...
  */
 router.get('/image', async (req, res) => {
+    const { url } = req.query;
+    if (!url || !/^https?:\/\//i.test(url)) {
+        return res.status(400).json({ error: 'http(s) URL required' });
+    }
     try {
-        const { url } = req.query;
-        if (!url) {
-            return res.status(400).json({ error: 'URL required' });
-        }
-
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/*,*/*;q=0.8'
-            }
-        });
-
-        if (!response.ok) {
-            return res.status(response.status).send('Failed to fetch image');
-        }
-
-        const contentType = response.headers.get('content-type') || 'image/png';
-        res.set('Content-Type', contentType);
+        const image = await imageCache.get(url);
+        res.set('Content-Type', image.type || 'image/png');
         res.set('Access-Control-Allow-Origin', '*');
-        res.set('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
-
-        // Efficiently pipe the response body
-        if (response.body) {
-            // response.body is an AsyncIterable in standard fetch/undici
-            // Readable.from converts it to a Node.js Readable stream
-            const stream = Readable.from(response.body);
-            stream.pipe(res);
+        res.set('Cache-Control', `public, max-age=${imageCache.maxAge(url)}${imageCache.isTmdb(url) ? ', immutable' : ''}`);
+        if (image.file) {
+            imageCache.createReadStream(image.file)
+                .on('error', () => { if (!res.headersSent) res.status(500); res.end(); })
+                .pipe(res);
         } else {
-            res.end();
+            res.end(image.body);
         }
-
     } catch (err) {
+        if (err.status) return res.status(err.status).send('Failed to fetch image');
         console.error('Image proxy error:', err.message);
-        res.status(500).send('Image proxy error');
+        res.status(502).send('Image proxy error');
     }
 });
 

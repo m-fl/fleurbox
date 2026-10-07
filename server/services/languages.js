@@ -51,8 +51,11 @@ const LANGUAGES = [
 
 const CODE_TO_LANGUAGE = new Map(LANGUAGES.flatMap(l => l.codes.map(code => [code, l.id])));
 // "EN - x", "4K-EN - x", "EN-TOP - x", "US| x", "US | x", "MX: x" (upper-case code only,
-// so ordinary titles like "It (2017)" or "Up: ..." never read as a code)
-const PREFIX_RE = /^(?:4K-)?([A-Z]{2,3})(?:-[A-Z]+)?\s*[-|:]/;
+// so ordinary titles like "It (2017)" or "Up: ..." never read as a code).
+// Second part: "BE-NL - x" / "BE-FR - x" (bilingual country + language).
+const PREFIX_RE = /^(?:4K-)?([A-Z]{2,3})(?:-([A-Z]+))?\s*[-|:]/;
+// Category names ending in a language code: "BELGIUM KIDS (NL)", "VIDEOLAND SERIES (NL)"
+const CATEGORY_SUFFIX_RE = /\(([A-Z]{2,3})\)\s*$/;
 
 /**
  * Language id marked on a title or category name, or null when there is none.
@@ -62,11 +65,17 @@ function detect(text, isCategory = false) {
     if (!text) return null;
     const m = PREFIX_RE.exec(text);
     if (m && CODE_TO_LANGUAGE.has(m[1])) return CODE_TO_LANGUAGE.get(m[1]);
+    // First part isn't a language (BE = Belgium, VP = Viaplay, SO = a pack):
+    // the second part may be ("BE-NL", "VP-NL", "SO-EN"). Only then - for
+    // "IN-EN" / "AF-EN" the first part already decides.
+    if (m && m[2] && CODE_TO_LANGUAGE.has(m[2])) return CODE_TO_LANGUAGE.get(m[2]);
     if (isCategory) {
         const upper = text.toUpperCase();
         for (const lang of LANGUAGES) {
             if (lang.words.some(w => upper.startsWith(w))) return lang.id;
         }
+        const s = CATEGORY_SUFFIX_RE.exec(text);
+        if (s && CODE_TO_LANGUAGE.has(s[1])) return CODE_TO_LANGUAGE.get(s[1]);
     }
     return null;
 }

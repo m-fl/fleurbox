@@ -33,8 +33,9 @@ const LanguagePriority = {
         return !!(app?.player?.settings?.languageHardFilter && this.selected(app));
     },
 
-    // "EN - x", "4K-EN - x", "EN-TOP - x", "US| x", "MX: x" - same as languages.js
-    PREFIX_RE: /^(?:4K-)?([A-Z]{2,3})(?:-[A-Z]+)?\s*[-|:]/,
+    // "EN - x", "4K-EN - x", "EN-TOP - x", "US| x", "MX: x", "BE-NL - x" - same as languages.js
+    PREFIX_RE: /^(?:4K-)?([A-Z]{2,3})(?:-([A-Z]+))?\s*[-|:]/,
+    CATEGORY_SUFFIX_RE: /\(([A-Z]{2,3})\)\s*$/,
 
     /**
      * The raw provider code a name starts with ("US| ESPN" -> "US"), or null
@@ -55,10 +56,13 @@ const LanguagePriority = {
         }
         const m = this.PREFIX_RE.exec(text);
         if (m && this.codeMap.has(m[1])) return this.codeMap.get(m[1]);
+        if (m && m[2] && this.codeMap.has(m[2])) return this.codeMap.get(m[2]);
         if (isCategory) {
             const upper = text.toUpperCase();
             const lang = this.loaded.find(l => (l.words || []).some(w => upper.startsWith(w)));
             if (lang) return lang.id;
+            const s = this.CATEGORY_SUFFIX_RE.exec(text);
+            if (s && this.codeMap.has(s[1])) return this.codeMap.get(s[1]);
         }
         return null;
     },

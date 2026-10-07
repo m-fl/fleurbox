@@ -7,6 +7,7 @@
  */
 
 const { getDb } = require('../db/sqlite');
+const tmdbStats = require('./tmdbStats');
 
 const API_BASE = 'https://api.themoviedb.org/3';
 const KINDS = ['movie', 'tv'];
@@ -48,6 +49,7 @@ async function refresh(kind) {
 
     const list = [];
     for (let page = 1; page <= PAGES; page++) {
+        tmdbStats.record('trending');
         const res = await fetch(`${API_BASE}/trending/${kind}/week?language=en-US&page=${page}`, {
             headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
             signal: AbortSignal.timeout(20000)

@@ -4,7 +4,7 @@
  *
  * Like tmdbTrending, TMDB is never called while a page waits: get() answers
  * from the `tmdb_discover` table only and queues a background fetch when a
- * list is missing or over a day old. The queue runs one request at a time,
+ * list is missing or over 3 days old (failed lists wait 6 hours to retry). The queue runs one request at a time,
  * spaced REQUEST_GAP_MS apart (TMDB asks for politeness).
  *
  * Keywords (motifs such as "heist") are looked up by name once and stored in
@@ -12,11 +12,17 @@
  */
 
 const { getDb } = require('../db/sqlite');
+const tmdbStats = require('./tmdbStats');
 
 const API_BASE = 'https://api.themoviedb.org/3';
 const PAGES = 2;                               // 20 titles per page
-const MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const KEYWORD_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+// "Popular in a genre right now" moves slowly; refetch every 3 days
+const MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+// Keyword ids never change on TMDB
+const KEYWORD_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+// A list that failed isn't retried for this long (not on every Home load)
+const RETRY_AFTER_FAILURE_MS = 6 * 60 * 60 * 1000;
+const MAX_429_RETRIES = 3;
 const REQUEST_GAP_MS = 300;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -57,6 +63,8 @@ function listKey(req) {
 
 const queue = [];             // pending requests (deduplicated by key)
 const queued = new Set();
+const failedAt = new Map();   // key -> ms of the last failed fetch
+let authFailedAt = 0;         // bad token: no requests for a while
 let running = false;
 
 function enabled() {
@@ -73,8 +81,9 @@ function get(req) {
     const key = listKey(req);
     const row = getDb().prepare('SELECT ids, fetched_at FROM tmdb_discover WHERE key = ?').get(key);
     const stale = !row || Date.now() - row.fetched_at > MAX_AGE_MS;
+    const backingOff = Date.now() - Math.max(failedAt.get(key) || 0, authFailedAt) < RETRY_AFTER_FAILURE_MS;
     let pending = false;
-    if (stale && enabled()) {
+    if (stale && enabled() && !backingOff) {
         enqueue(key, req);
         pending = true;
     }
@@ -100,9 +109,17 @@ async function run() {
             const { key, req } = queue.shift();
             try {
                 await fetchList(key, req);
+                failedAt.delete(key);
             } catch (err) {
                 console.warn(`[TMDB] Discover ${key} failed:`, err.message);
-                if (/HTTP 401/.test(err.message)) { queue.length = 0; queued.clear(); break; }
+                failedAt.set(key, Date.now());
+                if (/HTTP 401/.test(err.message)) {
+                    authFailedAt = Date.now();
+                    queue.forEach(q => failedAt.set(q.key, Date.now()));
+                    queue.length = 0;
+                    queued.clear();
+                    break;
+                }
             } finally {
                 queued.delete(key);
             }
@@ -112,16 +129,17 @@ async function run() {
     }
 }
 
-async function tmdb(path) {
+async function tmdb(path, attempt = 0) {
     await sleep(REQUEST_GAP_MS);
+    tmdbStats.record(path.startsWith('/search/keyword') ? 'keywords' : 'discover');
     const res = await fetch(`${API_BASE}${path}`, {
         headers: { Authorization: `Bearer ${process.env.TMDB_READ_TOKEN}`, Accept: 'application/json' },
         signal: AbortSignal.timeout(20000)
     });
-    if (res.status === 429) {
+    if (res.status === 429 && attempt < MAX_429_RETRIES) {
         const wait = (parseInt(res.headers.get('retry-after'), 10) || 10) * 1000;
         await sleep(wait);
-        return tmdb(path);
+        return tmdb(path, attempt + 1);
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();

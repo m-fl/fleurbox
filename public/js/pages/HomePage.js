@@ -403,7 +403,7 @@ class HomePage {
 
         // Proxy the poster if it's an external URL
         const poster = data.poster || '/img/poster-placeholder.jpg';
-        const posterUrl = poster.startsWith('http') ? `/api/proxy/image?url=${encodeURIComponent(poster)}` : poster;
+        const posterUrl = API.imageUrl(poster);
 
         return `
             <div class="dashboard-card" data-id="${item_id}" data-key="${item.key || ''}" data-type="${type}">
@@ -430,7 +430,7 @@ class HomePage {
         const { data, item_id } = item;
         const type = item.type || item.item_type;
         const poster = item.stream_icon || data.poster || '/img/poster-placeholder.jpg';
-        const posterUrl = poster.startsWith('http') ? `/api/proxy/image?url=${encodeURIComponent(poster)}` : poster;
+        const posterUrl = API.imageUrl(poster);
 
         return `
             <div class="dashboard-card" data-id="${item_id}" data-type="${type}">
@@ -560,7 +560,7 @@ class HomePage {
             wrap.innerHTML = rows.map((row, r) => `
                 <section class="dashboard-section for-you-row" style="--r:${r}">
                     <div class="section-header">
-                        <h2>${row.emoji ? `<span class="row-emoji">${row.emoji}</span>` : ''}${this.escapeHtml(row.title)}</h2>
+                        <h2>${this.escapeHtml(row.title)}</h2>
                         ${r === 0 ? '<button class="taste-edit" data-action="quiz">Retake quiz</button>' : ''}
                     </div>
                     <div class="scroll-wrapper">
