@@ -593,20 +593,63 @@ class HomeSidebar {
     }
 
     /**
-     * Spotlight: a title-matching movie/series, else the first movie/series
-     * hit, else the first channel - with backdrop, plot and actions
+     * A title as people would type it: provider prefixes ("4K-EN - ",
+     * "EN-TOP - 19. "), trailing "(2022)" / "(US)" and punctuation removed
+     */
+    plainTitle(name) {
+        return String(name || '')
+            .replace(/^(?:[A-Z0-9+]{1,6}(?:-[A-Z0-9+]{1,6})*\s*[-|:]\s*)+/, '')
+            .replace(/^\d+\.\s*/, '')
+            .replace(/(\s*\([^)]*\))+\s*$/, '')
+            .toLowerCase()
+            .replace(/[^\p{L}\p{N}]+/gu, ' ')
+            .trim();
+    }
+
+    /**
+     * How well a result's title matches the typed words: exact title >
+     * starts with them > contains them. TMDB rating breaks ties, so the
+     * series "South Park" (8.3) beats the movie special "South Park: The
+     * Streaming Wars", and Fargo the series beats Fargo the movie.
+     */
+    titleScore(item, words) {
+        const title = this.plainTitle(item.name);
+        const rating = Number(item.tmdb_rating) || 0;
+        let score = 0;
+        if (words) {
+            if (title === words) score = 100;
+            else if (title.startsWith(words)) score = 60;
+            else if (title.includes(words)) score = 30;
+        }
+        return score + rating;
+    }
+
+    /**
+     * Spotlight: the best title match across movies and series (see
+     * titleScore), else the first channel - with backdrop, plot and actions.
+     * The winning type's row is moved to the top.
      */
     renderSpotlight(q) {
         const slot = document.getElementById('stage-spotlight');
         if (!slot) return;
-        const words = q.toLowerCase().replace(/\b\w+:\S*/g, '').trim();
+        const words = this.plainTitle(q.replace(/\b\w+:("[^"]*"|\S*)/g, ' ').replace(/(^|\s)-\S+/g, ' '));
         const pool = [
-            ...this.items.movie.slice(0, 4).map(item => ({ item, type: 'movie' })),
-            ...this.items.series.slice(0, 4).map(item => ({ item, type: 'series' }))
-        ];
-        const pick = (words && pool.find(p => p.item.name.toLowerCase().includes(words))) ||
-            pool[0] || (this.items.live[0] && { item: this.items.live[0], type: 'live' });
+            ...this.items.movie.slice(0, 6).map(item => ({ item, type: 'movie' })),
+            ...this.items.series.slice(0, 6).map(item => ({ item, type: 'series' }))
+        ].map(p => ({ ...p, score: this.titleScore(p.item, words) }));
+        // A tie goes to the series: the provider also files some shows as
+        // "movies" under the same name and rating (e.g. Breaking Bad)
+        const best = pool.reduce((a, b) =>
+            (b.score > a.score || (b.score === a.score && b.type === 'series') ? b : a), pool[0]);
+        const pick = best || (this.items.live[0] && { item: this.items.live[0], type: 'live' });
         if (!pick) { slot.remove(); return; }
+
+        // Series won: show its row above Movies
+        if (pick.type === 'series') {
+            const seriesRow = document.getElementById('stage-row-series');
+            const movieRow = document.getElementById('stage-row-movie');
+            if (seriesRow && movieRow) movieRow.before(seriesRow);
+        }
 
         const { item, type } = pick;
         const poster = item.stream_icon ? API.imageUrl(item.stream_icon)
