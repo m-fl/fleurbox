@@ -5487,7 +5487,6 @@ kbd {
   overflow-x: hidden;
   margin-right: calc(-1 * var(--space-xs));
   padding-right: var(--space-xs);
-  scrollbar-width: thin;
 }
 
 .rail-channel {
@@ -5943,7 +5942,51 @@ kbd {
   overflow-x: auto;
   padding: 4px 2px 14px;
   scroll-snap-type: x proximity;
-  scrollbar-width: thin;
+}
+
+/* Slim scrollbars, faint until hovered (like the Home rows). No
+   scrollbar-width here: Chrome then ignores ::-webkit-scrollbar and draws the
+   OS default (light, with arrow buttons). */
+.stage-shelf::-webkit-scrollbar,
+.rail-channels::-webkit-scrollbar,
+.stage-body::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.stage-shelf::-webkit-scrollbar-track,
+.rail-channels::-webkit-scrollbar-track,
+.stage-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.stage-shelf::-webkit-scrollbar-thumb,
+.rail-channels::-webkit-scrollbar-thumb,
+.stage-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.stage-shelf:hover::-webkit-scrollbar-thumb,
+.rail-channels:hover::-webkit-scrollbar-thumb,
+.stage-body:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.stage-shelf::-webkit-scrollbar-button,
+.rail-channels::-webkit-scrollbar-button,
+.stage-body::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* Firefox has no ::-webkit-scrollbar */
+@supports not selector(::-webkit-scrollbar) {
+  .stage-shelf,
+  .rail-channels,
+  .stage-body {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  }
 }
 
 .stage-card {
