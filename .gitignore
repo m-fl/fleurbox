@@ -1,0 +1,21 @@
+node_modules/
+data/*.db
+.env*
+!.env.example
+*.log
+data/
+user_data/
+coverage/
+.DS_Store
+dist/
+release/
+.vscode
+transcode-cache/
+
+# Local notes and assistant files (not part of the project)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+TODO.md
+docs/
+*.swp

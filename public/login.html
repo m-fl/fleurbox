@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in - fleurbox</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="css/main.css?v=13">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Meow+Script&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--color-bg-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        .login-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .login-box {
+            background: var(--color-bg-secondary);
+            padding: var(--space-2xl);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+            width: 100%;
+            max-width: 420px;
+            border: 1px solid var(--color-border);
+        }
+
+        .login-logo {
+            text-align: center;
+            margin-bottom: var(--space-2xl);
+        }
+
+        .login-logo .logo-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto var(--space-xs);
+            color: var(--color-accent-text);
+        }
+
+        .login-logo h1 {
+            font-family: var(--font-brand);
+            font-size: 64px;
+            font-weight: 400;
+            line-height: 1;
+            color: var(--color-text-primary);
+            margin: 0;
+        }
+
+        .login-logo .brand-accent {
+            color: var(--color-accent-text);
+        }
+
+        .login-logo p {
+            color: var(--color-text-secondary);
+            margin: var(--space-sm) 0 0 0;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: var(--space-lg);
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: var(--space-sm);
+            color: var(--color-text-primary);
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--color-bg-tertiary);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            color: var(--color-text-primary);
+            font-size: 15px;
+            font-family: 'Outfit', sans-serif;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--color-accent-border);
+            background: var(--color-bg-hover);
+        }
+
+        .form-group input::placeholder {
+            color: var(--color-text-muted);
+        }
+
+        .btn-login {
+            width: 100%;
+            padding: 14px;
+            background: var(--color-accent);
+            color: white;
+            border: none;
+            border-radius: var(--radius-md);
+            font-size: 16px;
+            font-weight: 600;
+            font-family: 'Outfit', sans-serif;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-login:hover {
+            background: var(--color-accent-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(var(--color-accent-rgb), 0.3);
+        }
+
+        .btn-login:active {
+            transform: translateY(0);
+        }
+
+        .btn-login:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .error-message {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--color-error);
+            padding: 12px 16px;
+            border-radius: var(--radius-md);
+            margin-bottom: var(--space-lg);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            font-size: 14px;
+            display: none;
+        }
+
+        .error-message.show {
+            display: block;
+        }
+
+        .setup-message {
+            background: rgba(var(--color-accent-rgb), 0.1);
+            color: var(--color-accent-text);
+            padding: 12px 16px;
+            border-radius: var(--radius-md);
+            margin-bottom: var(--space-lg);
+            border: 1px solid var(--color-accent-dim);
+            font-size: 14px;
+            display: none;
+        }
+
+        .setup-message.show {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="login-container">
+        <div class="login-box">
+            <div class="login-logo">
+                <svg class="logo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M33.4 31.5c-2.6 8.6 3.4 14.2-4.2 26.5"/>
+                  <path d="M32.2 45.2c4.4-5.6 9.6-5 13.4-9.6-5.6-.6-10.8 2.2-13.4 9.6z"/>
+                  <g transform="translate(33.5 21) rotate(-13)">
+                    <path transform="rotate(-6) translate(0 -3)" d="M0 0C-5.4-3.2-5.8-10.2 0-12.6 5.8-10.2 5.4-3.2 0 0z"/>
+                    <path transform="rotate(66) translate(0 -3)" d="M0 0C-4.9-2.8-5.2-8.6 0-10.6 5.2-8.6 4.9-2.8 0 0z"/>
+                    <path transform="rotate(140) translate(0 -3)" d="M0 0C-5.9-3.1-6.2-9.9 0-12.2 6.2-9.9 5.9-3.1 0 0z"/>
+                    <path transform="rotate(209) translate(0 -3)" d="M0 0C-4.5-2.5-4.7-7.8 0-9.6 4.7-7.8 4.5-2.5 0 0z"/>
+                    <path transform="rotate(283) translate(0 -3)" d="M0 0C-5.3-3-5.6-9.3 0-11.6 5.6-9.3 5.3-3 0 0z"/>
+                  </g>
+                  <circle cx="33.9" cy="20.6" r="2.3" fill="#D97757" stroke="none"/>
+                </svg>
+                <h1>fleurbox</h1>
+                <p id="login-subtitle">Sign in to continue</p>
+            </div>
+
+            <div class="error-message" id="error-message"></div>
+            <div class="setup-message" id="setup-message">
+                Welcome! Please create your admin account to get started.
+            </div>
+
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required autocomplete="username"
+                        placeholder="Enter your username">
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required autocomplete="current-password"
+                        minlength="6" placeholder="Enter your password">
+                </div>
+
+                <button type="submit" class="btn-login" id="submit-btn">Sign In</button>
+            </form>
+
+            <div class="sso-divider" style="text-align: center; margin: 20px 0; position: relative;">
+                <span
+                    style="background: var(--color-bg-secondary); padding: 0 10px; color: var(--color-text-secondary); font-size: 14px; position: relative; z-index: 1;">OR</span>
+                <div
+                    style="position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: var(--color-border); z-index: 0;">
+                </div>
+            </div>
+
+            <button id="btn-sso-login" class="btn-login"
+                style="background: transparent; border: 1px solid var(--color-border); color: var(--color-text-primary); display: flex; align-items: center; justify-content: center; gap: 10px; transition: all 0.2s;">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"
+                    style="width: 20px; height: 20px;">
+                    <path
+                        d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z" />
+                </svg>
+                Sign in with SSO
+            </button>
+
+            <style>
+                #btn-sso-login:hover {
+                    background: var(--color-bg-tertiary) !important;
+                    border-color: var(--color-accent-border) !important;
+                    color: var(--color-accent-text) !important;
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+                }
+            </style>
+        </div>
+    </div>
+
+    <script>
+        // Start SSO Login
+        document.getElementById('btn-sso-login').addEventListener('click', () => {
+            window.location.href = '/api/auth/oidc/login';
+        });
+
+        // Check for URL Error params
+        const urlParams = new URLSearchParams(window.location.search);
+        const error = urlParams.get('error');
+        if (error) {
+            const errorMessage = document.getElementById('error-message');
+            errorMessage.textContent = error;
+            errorMessage.classList.add('show');
+            // Clean URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        // Check if setup is required
+        let isSetupMode = false;
+
+        async function checkSetupRequired() {
+            try {
+                const response = await fetch('/api/auth/setup-required');
+                const data = await response.json();
+
+                if (data.setupRequired) {
+                    isSetupMode = true;
+                    document.getElementById('login-subtitle').textContent = 'Create Admin Account';
+                    document.getElementById('submit-btn').textContent = 'Create Account';
+                    document.getElementById('setup-message').classList.add('show');
+                    document.getElementById('password').placeholder = 'Minimum 6 characters';
+                    // Hide SSO in setup mode
+                    document.querySelector('.sso-divider').style.display = 'none';
+                    document.getElementById('btn-sso-login').style.display = 'none';
+                }
+            } catch (err) {
+                console.error('Error checking setup status:', err);
+            }
+        }
+
+        // Handle form submission
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const submitBtn = document.getElementById('submit-btn');
+            const errorMessage = document.getElementById('error-message');
+
+            // Clear previous errors
+            errorMessage.classList.remove('show');
+            errorMessage.textContent = '';
+
+            // Disable button
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Please wait...';
+
+            try {
+                const endpoint = isSetupMode ? '/api/auth/setup' : '/api/auth/login';
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Authentication failed');
+                }
+
+                // Store token
+                localStorage.setItem('authToken', data.token);
+
+                // Redirect to main app (replace history to prevent back button issues)
+                window.location.replace('/');
+
+            } catch (err) {
+                errorMessage.textContent = err.message;
+                errorMessage.classList.add('show');
+                submitBtn.disabled = false;
+                submitBtn.textContent = isSetupMode ? 'Create Account' : 'Sign In';
+            }
+        });
+
+        // Check setup status on load
+        checkSetupRequired();
+    </script>
+</body>
+
+</html>

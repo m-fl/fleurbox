@@ -1,0 +1,11 @@
+# Keep secrets and runtime state out of the image: data/ is bind-mounted at
+# runtime (db.json holds provider credentials), .env reaches the container via
+# env_file, and node_modules is installed inside the image by npm ci.
+.git
+.env
+data
+node_modules
+transcode-cache
+docker-compose*.yml
+*.patch
+.github

@@ -1,0 +1,19 @@
+services:
+  fleurbox:
+    image: fleurbox:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fleurbox
+    # JWT_SECRET, TMDB_READ_TOKEN and OIDC settings (see .env.example)
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000 # Internal container port
