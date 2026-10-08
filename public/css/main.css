@@ -6948,3 +6948,167 @@ kbd {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* =====================================================
+   Live Events: Home cards (HomePage.renderLiveEvents), Live TV event groups
+   (ChannelList) and the quiz's sports step (TasteQuiz)
+   ===================================================== */
+
+.event-card .event-art {
+  position: relative;
+  aspect-ratio: 16/10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 120%, var(--color-accent-dim), transparent 70%), var(--color-bg-tertiary);
+  overflow: hidden;
+}
+
+.event-card.is-live .event-art {
+  background: radial-gradient(circle at 50% 120%, rgba(229, 103, 90, 0.25), transparent 70%), var(--color-bg-tertiary);
+}
+
+.event-sides {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+}
+
+.event-sides img,
+.event-initials {
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4));
+}
+
+.event-initials {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  font-weight: 700;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+}
+
+.event-vs {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.event-sides-text {
+  text-align: center;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  line-height: 1.3;
+}
+
+.card-badge.event-live {
+  background: var(--color-error);
+  letter-spacing: 0.04em;
+}
+
+.card-badge.event-when {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.event-fav {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  color: var(--color-warning);
+  font-size: 16px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+/* Live TV sidebar */
+.group-header.event-group {
+  border-left: 3px solid var(--color-accent-border);
+}
+
+.group-header.event-group .group-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.group-header.event-group.is-favourite .group-name {
+  color: var(--color-warning);
+}
+
+.event-group-when {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.group-header.event-group.is-live {
+  border-left-color: var(--color-error);
+}
+
+.group-header.event-group.is-live .event-group-when {
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-error);
+  color: var(--color-text-primary);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* Quiz: sports step */
+.quiz-field-hint {
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.quiz-team-search {
+  width: 100%;
+  margin: 10px 0;
+  padding: 9px 14px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  color: var(--color-text-primary);
+  font-size: 0.88rem;
+}
+
+.quiz-team-search:focus {
+  outline: none;
+  border-color: var(--color-accent-border);
+}
+
+.quiz-team-picked:empty {
+  display: none;
+}
+
+.quiz-team-results {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.quiz-chip.quiz-team {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 6px 8px;
+}
+
+.quiz-chip.quiz-team img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.quiz-team-x {
+  margin-left: 2px;
+  opacity: 0.8;
+}

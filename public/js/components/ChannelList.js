@@ -20,6 +20,8 @@ class ChannelList {
         this.groupChannelCache = new Map(); // group name -> its channels, once fetched
         this.groupLoads = new Map(); // group name -> in-flight Promise
         this.favoriteChannels = []; // favourite channels with full details
+        this.events = []; // today's live events (GET /api/live/events), each with its channels
+        this.eventGroups = new Map(); // group key ("event:<id>") -> event, for the pinned event groups
         this.searchResults = null; // { term, channels, truncated } while searching
         this.allChannels = null; // every channel, only loaded for the TV Guide grid
         this.loaded = false;
@@ -409,6 +411,24 @@ class ChannelList {
         return `${groupName}|${channel.id}`;
     }
 
+    /**
+     * Favorites and the event groups sit on top and list channels the server
+     * picked, so they skip the hidden/visibility filtering of normal groups
+     */
+    isPinnedGroup(groupName) {
+        return groupName === 'Favorites' || this.eventGroups.has(groupName);
+    }
+
+    /** "20:30", "Tomorrow 20:30" or "Sat 20:30", in local time */
+    eventTime(iso) {
+        const date = new Date(iso);
+        const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const days = Math.round((new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+        if (days === 0) return time;
+        if (days === 1) return `Tomorrow ${time}`;
+        return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+    }
+
     renderGroups() {
         const searching = !!this.searchResults;
         const showHidden = this.includeHidden();
@@ -443,12 +463,29 @@ class ChannelList {
             groupCounts['Favorites'] = favoritedChannels.length;
         }
 
+        // Live events, one group each, below Favorites (not while searching)
+        this.eventGroups = new Map();
+        if (!searching) {
+            this.events.forEach(event => {
+                const channels = event.channels.filter(ch => this.matchesSourceFilter(ch));
+                if (!channels.length) return;
+                const key = `event:${event.id}`;
+                this.eventGroups.set(key, event);
+                groupedChannels[key] = channels;
+                groupCounts[key] = channels.length;
+            });
+        }
+        const eventOrder = [...this.eventGroups.keys()];
+
         // Sort Groups and filter to only those with visible channels.
         // Language Priority may lead with some groups (see groupRanker).
         const rank = this.groupRanker(searching);
         const allGroups = Object.keys(groupedChannels).sort((a, b) => {
             if (a === 'Favorites') return -1;
             if (b === 'Favorites') return 1;
+            const ea = eventOrder.indexOf(a);
+            const eb = eventOrder.indexOf(b);
+            if (ea >= 0 || eb >= 0) return (ea < 0 ? Infinity : ea) - (eb < 0 ? Infinity : eb);
             if (rank && rank(a) !== rank(b)) return rank(a) - rank(b);
             return a.localeCompare(b);
         });
@@ -458,7 +495,7 @@ class ChannelList {
         this.sortedGroups = allGroups.filter(groupName => {
             const channels = groupedChannels[groupName];
             if (!channels) return groupCounts[groupName] > 0;
-            if (groupName === 'Favorites') return true;
+            if (this.isPinnedGroup(groupName)) return true;
             return channels.some(channel => this.isChannelVisible(channel, showHidden));
         });
 
@@ -469,7 +506,7 @@ class ChannelList {
         // Collapse all groups by default on first load (for large playlists)
         if (!this._hasCollapsedState && this.sortedGroups.length > 0) {
             this.sortedGroups.forEach(groupName => {
-                if (groupName !== 'Favorites') {
+                if (!this.isPinnedGroup(groupName)) {
                     this.collapsedGroups.add(groupName);
                 }
             });
@@ -529,9 +566,9 @@ class ChannelList {
         (this.sortedGroups || []).forEach(groupName => {
             const channels = this.groupedChannels[groupName];
             if (!channels) return;
-            const isFavoritesGroup = groupName === 'Favorites';
+            const pinned = this.isPinnedGroup(groupName);
             channels.forEach(ch => {
-                if (!isFavoritesGroup && !this.isChannelVisible(ch, this.showHidden)) return;
+                if (!pinned && !this.isChannelVisible(ch, this.showHidden)) return;
                 this.renderedChannels.push({
                     ...ch,
                     _renderId: this.renderIdFor(groupName, ch),
@@ -562,26 +599,34 @@ class ChannelList {
         for (const groupName of groupsToRender) {
             const channels = this.groupedChannels[groupName];
             const isFavoritesGroup = groupName === 'Favorites';
+            const event = this.eventGroups.get(groupName);
 
             // Visible channels, when the group's channels are fetched
             const visibleChannels = channels
-                ? channels.filter(ch => isFavoritesGroup || this.isChannelVisible(ch, this.showHidden))
+                ? channels.filter(ch => this.isPinnedGroup(groupName) || this.isChannelVisible(ch, this.showHidden))
                 : null;
             if (visibleChannels && visibleChannels.length === 0) continue;
             const count = visibleChannels ? visibleChannels.length : this.groupCounts[groupName];
 
-            // Default new groups to collapsed (except Favorites)
-            if (!isFavoritesGroup && !this.collapsedGroups.has(groupName) && !this._userExpandedGroups?.has(groupName)) {
+            // Default new groups to collapsed (except Favorites and events on now)
+            const openByDefault = isFavoritesGroup || event?.live;
+            if (!openByDefault && !this.collapsedGroups.has(groupName) && !this._userExpandedGroups?.has(groupName)) {
                 this.collapsedGroups.add(groupName);
             }
             const collapsed = this.collapsedGroups.has(groupName);
             const safeName = this.escapeHtml(groupName);
+            const headerClass = isFavoritesGroup ? 'favorites-group'
+                : event ? `event-group ${event.live ? 'is-live' : ''} ${event.favourite ? 'is-favourite' : ''}` : '';
+            const label = event
+                ? `<span class="group-name" title="${this.escapeHtml([event.competition, event.programme].filter(Boolean).join(' · '))}">${this.escapeHtml(event.title)}</span>
+            <span class="event-group-when">${event.live ? 'LIVE' : this.escapeHtml(this.eventTime(event.start))}</span>`
+                : `<span class="group-name">${safeName}</span>`;
 
             html += `
         <div class="channel-group">
-          <div class="group-header ${collapsed ? 'collapsed' : ''} ${isFavoritesGroup ? 'favorites-group' : ''}" data-group="${safeName}">
+          <div class="group-header ${collapsed ? 'collapsed' : ''} ${headerClass}" data-group="${safeName}">
             <span class="group-toggle">${Icons.chevronDown}</span>
-            <span class="group-name">${safeName}</span>
+            ${label}
             <span class="group-count">${count}</span>
           </div>
           <div class="group-channels" data-group="${safeName}">`;
@@ -626,10 +671,10 @@ class ChannelList {
      * Channel rows for a group
      */
     channelItemsHtml(groupName, channels) {
-        const isFavoritesGroup = groupName === 'Favorites';
+        const pinned = this.isPinnedGroup(groupName);
         return channels.map(channel => {
             // Check hidden again for styling (showHidden mode)
-            const channelHidden = !isFavoritesGroup && !this.isChannelVisible(channel, false);
+            const channelHidden = !pinned && !this.isChannelVisible(channel, false);
             const isActive = this.currentChannel?.id === channel.id;
             const renderId = this.renderIdFor(groupName, channel);
             const isRenderActive = this.currentRenderId === renderId;
@@ -677,7 +722,10 @@ class ChannelList {
                     }
                 }
             });
-            header.addEventListener('contextmenu', (e) => this.showContextMenu(e, 'group', header.dataset));
+            // Event groups aren't categories: nothing to hide or rename
+            if (!this.eventGroups.has(header.dataset.group)) {
+                header.addEventListener('contextmenu', (e) => this.showContextMenu(e, 'group', header.dataset));
+            }
         }
 
         this.attachItemListeners(groupEl);
@@ -732,8 +780,8 @@ class ChannelList {
             if (!container.isConnected) return; // the list was re-rendered meanwhile
         }
 
-        const isFavoritesGroup = groupName === 'Favorites';
-        const visibleChannels = channels.filter(ch => isFavoritesGroup || this.isChannelVisible(ch, this.showHidden));
+        const pinned = this.isPinnedGroup(groupName);
+        const visibleChannels = channels.filter(ch => pinned || this.isChannelVisible(ch, this.showHidden));
         container.innerHTML = this.channelItemsHtml(groupName, visibleChannels);
         this.attachItemListeners(container);
 
@@ -842,11 +890,16 @@ class ChannelList {
         this.container.innerHTML = '<div class="loading"></div>';
 
         try {
-            const [groups, favorites] = await Promise.all([
+            const [groups, favorites, , , events] = await Promise.all([
                 API.live.groups(this.sourceSelect.value, this.includeHidden()),
                 API.live.favorites(),
                 this.loadHiddenItems(),
-                this.loadFavorites()
+                this.loadFavorites(),
+                // Optional: the list works without the event groups
+                API.live.events().catch(err => {
+                    console.warn('Live events unavailable:', err);
+                    return [];
+                })
             ]);
 
             // Same-named categories from different sources show as one group
@@ -859,6 +912,7 @@ class ChannelList {
             this.groupLoads = new Map();
             this.allChannels = null; // sources may have changed
             this.favoriteChannels = this.rememberChannels(favorites);
+            this.events = events.map(e => ({ ...e, channels: this.rememberChannels(e.channels) }));
             this.searchResults = null; // re-run any search for the new source/filters
             this.loaded = true;
 

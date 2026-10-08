@@ -10,6 +10,9 @@
  *    `icon` names a line icon in public/js/icons.js (Icons.line).
  *  - motifs: TMDB keyword names (resolved to ids by tmdbDiscover) plus plain
  *    `words` matched against stored plots for the local fallback.
+ *  - sports/regions: the "Sports fan?" step. Regions add leagues (an additive
+ *    list); the leagues themselves live in services/liveEvents.js LEAGUES.
+ *    Teams are picked from ESPN's team lists and stored as liveEvents keys.
  *
  * Ranking: TMDB's current popularity within the genre/motif (tmdbDiscover,
  * fetched in the background), matched to titles actually in the library, then
@@ -21,6 +24,7 @@ const { getDb } = require('../db/sqlite');
 const tmdbDiscover = require('./tmdbDiscover');
 const tmdbTrending = require('./tmdbTrending');
 const languages = require('./languages');
+const liveEvents = require('./liveEvents');
 
 const CATALOG = {
     genres: [
@@ -78,8 +82,39 @@ const CATALOG = {
         { id: 'popular', label: "What everyone's watching" },
         { id: 'acclaimed', label: 'Critically acclaimed' }
     ],
-    limits: { genres: 5, motifs: 5 }
+    sports: [
+        { id: 'soccer', label: 'Football' },
+        { id: 'american-football', label: 'American Football' },
+        { id: 'basketball', label: 'Basketball' },
+        { id: 'hockey', label: 'Ice Hockey' },
+        { id: 'baseball', label: 'Baseball' },
+        { id: 'motorsport', label: 'Formula 1' },
+        { id: 'mma', label: 'UFC / MMA' }
+    ],
+    regions: [
+        { id: 'international', label: 'National teams' },
+        { id: 'europe', label: 'European cups' },
+        { id: 'england', label: 'England' },
+        { id: 'spain', label: 'Spain' },
+        { id: 'germany', label: 'Germany' },
+        { id: 'italy', label: 'Italy' },
+        { id: 'france', label: 'France' },
+        { id: 'belgium', label: 'Belgium' },
+        { id: 'netherlands', label: 'Netherlands' },
+        { id: 'portugal', label: 'Portugal' },
+        { id: 'scotland', label: 'Scotland' },
+        { id: 'turkey', label: 'Turkey' },
+        { id: 'north-america', label: 'USA & Canada' },
+        { id: 'mexico', label: 'Mexico' },
+        { id: 'south-america', label: 'South America' }
+    ],
+    limits: { genres: 5, motifs: 5, teams: 10 }
 };
+// Which regions mean something for each sport (the quiz shows only those)
+CATALOG.sportRegions = Object.fromEntries(CATALOG.sports.map(s => [s.id,
+    CATALOG.regions.map(r => r.id).filter(r => liveEvents.LEAGUES.some(l => l.sport === s.id && l.regions.includes(r)))]));
+const sportIds = new Set(CATALOG.sports.map(s => s.id));
+const regionIds = new Set(CATALOG.regions.map(r => r.id));
 
 const ROW_SIZE = 20;
 
@@ -110,19 +145,29 @@ function sanitize(input) {
     const pick = (list, known, max) => [...new Set(Array.isArray(list) ? list.map(String) : [])]
         .filter(id => known.has(id)).slice(0, max);
     const oneOf = (value, options, fallback) => options.some(o => o.id === value) ? value : fallback;
+    const sports = pick(input?.sports, sportIds, sportIds.size);
+    // Only teams the server knows (their lists are fetched for the quiz)
+    const known = liveEvents.teamsByKey(pick(input?.teams, { has: k => /^[a-z0-9.-]+:\d+$/.test(k) }, CATALOG.limits.teams));
     return {
         genres: pick(input?.genres, genreById, CATALOG.limits.genres),
         motifs: pick(input?.motifs, motifById, CATALOG.limits.motifs),
         format: oneOf(input?.format, CATALOG.formats, 'both'),
         era: oneOf(input?.era, CATALOG.eras, 'any'),
-        mood: oneOf(input?.mood, CATALOG.moods, 'popular')
+        mood: oneOf(input?.mood, CATALOG.moods, 'popular'),
+        sports,
+        regions: sports.length ? pick(input?.regions, regionIds, regionIds.size) : [],
+        teams: sports.length ? [...known.keys()] : []
     };
 }
 
 function getProfile(userId) {
     ensureTable();
     const row = getDb().prepare('SELECT json, updated_at FROM taste_profiles WHERE user_id = ?').get(userId);
-    return row ? { ...sanitize(JSON.parse(row.json)), updatedAt: row.updated_at } : null;
+    if (!row) return null;
+    const profile = sanitize(JSON.parse(row.json));
+    // Names/logos for the picked teams, so the quiz can show them again
+    const teams = liveEvents.teamsByKey(profile.teams);
+    return { ...profile, teamInfo: profile.teams.map(k => teams.get(k)), updatedAt: row.updated_at };
 }
 
 function saveProfile(userId, input) {
@@ -132,7 +177,8 @@ function saveProfile(userId, input) {
     getDb().prepare('INSERT OR REPLACE INTO taste_profiles (user_id, json, updated_at) VALUES (?, ?, ?)')
         .run(userId, JSON.stringify(profile), now);
     forYouCache.delete(userId);
-    return { ...profile, updatedAt: now };
+    if (profile.sports.length) liveEvents.profileChanged();
+    return getProfile(userId);
 }
 
 function deleteProfile(userId) {

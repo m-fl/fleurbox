@@ -4,8 +4,10 @@
  * Left: the sidebar (search + favourite channels, components/HomeSidebar.js).
  * Main column: the taste-quiz prompt or "For You" rows built from the user's
  * quiz answers (components/TasteQuiz.js, server/services/taste.js), Continue
- * Watching, "filter zones" and this week's trending movies/series (TMDB
- * ranking stored daily, matched to the library server-side). Filter zones
+ * Watching, Live Events (today's fixtures on the user's channels, their teams
+ * first; server/services/liveEvents.js), "filter zones" and this week's
+ * trending movies/series (TMDB ranking stored daily, matched to the library
+ * server-side). Filter zones
  * fetch nothing until tapped, and each pulls only a page of rows at a time to
  * keep requests small.
  *
@@ -82,6 +84,7 @@ class HomePage {
     hide() {
         this.sidebar.unmount();
         clearTimeout(this.forYouTimer);
+        clearTimeout(this.liveEventsTimer);
         this.forYouGen++;
         document.getElementById('page-home')?.replaceChildren();
         this.container = null;
@@ -118,6 +121,21 @@ class HomePage {
                             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
                         </button>
                         <div class="horizontal-scroll" id="continue-watching-list"></div>
+                        <button class="scroll-arrow scroll-right" aria-label="Scroll right">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="dashboard-section hidden" id="live-events-section">
+                    <div class="section-header">
+                        <h2>Live Events</h2>
+                    </div>
+                    <div class="scroll-wrapper">
+                        <button class="scroll-arrow scroll-left" aria-label="Scroll left">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                        </button>
+                        <div class="horizontal-scroll" id="live-events-list"></div>
                         <button class="scroll-arrow scroll-right" aria-label="Scroll right">
                             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
                         </button>
@@ -233,6 +251,7 @@ class HomePage {
             // sidebar). Filter zones still fetch only when tapped.
             await Promise.all([
                 this.renderContinueWatching(),
+                this.renderLiveEvents(),
                 this.renderForYou(),
                 this.renderTrending('movie', 'trending-movies'),
                 this.renderTrending('tv', 'trending-series')
@@ -310,6 +329,76 @@ class HomePage {
         });
 
         this.updateScrollArrows();
+    }
+
+    /**
+     * Live Events: today's fixtures on the user's channels (their teams first,
+     * then live, then upcoming). A card plays the best channel; Live TV lists
+     * every channel showing it.
+     */
+    async renderLiveEvents() {
+        const list = document.getElementById('live-events-list');
+        const section = document.getElementById('live-events-section');
+        if (!list || !section) return;
+
+        let events = [];
+        try {
+            events = await window.API.live.events(20);
+        } catch (err) {
+            console.warn('[Dashboard] Live events unavailable:', err);
+        }
+        if (!list.isConnected) return;
+        events = events.filter(e => e.channels?.length);
+        if (!events.length) {
+            section.classList.add('hidden');
+            return;
+        }
+
+        section.classList.remove('hidden');
+        list.innerHTML = events.map(e => this.createEventCard(e)).join('');
+        list.querySelectorAll('.event-card').forEach((card, i) => {
+            card.addEventListener('click', () => this.playChannel(events[i].channels[0]));
+        });
+        this.updateScrollArrows();
+    }
+
+    /** "20:30", "Tomorrow 20:30" or "Sat 20:30", in local time */
+    static eventTime(iso) {
+        const date = new Date(iso);
+        const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const days = Math.round((new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+        if (days === 0) return time;
+        if (days === 1) return `Tomorrow ${time}`;
+        return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+    }
+
+    createEventCard(event) {
+        const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+        const logo = side => side?.logo
+            ? `<img src="${API.imageUrl(side.logo)}" alt="${esc(side.short || side.name)}" loading="lazy" onerror="this.style.visibility='hidden'">`
+            : `<span class="event-initials">${esc((side?.short || side?.name || '?').slice(0, 3))}</span>`;
+        const art = event.home && event.away
+            ? `<div class="event-sides">${logo(event.home)}<span class="event-vs">vs</span>${logo(event.away)}</div>`
+            : `<div class="event-sides event-sides-text">${esc(event.competition || event.title)}</div>`;
+        const count = event.channels.length;
+        const meta = [event.competition, `${count} channel${count === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+
+        return `
+            <div class="dashboard-card event-card ${event.live ? 'is-live' : ''}" title="${esc(event.programme || event.title)}">
+                <div class="event-art">
+                    ${art}
+                    ${event.live ? '<span class="card-badge event-live">LIVE</span>'
+                        : `<span class="card-badge event-when">${esc(HomePage.eventTime(event.start))}</span>`}
+                    ${event.favourite ? '<span class="event-fav" title="Your team">&#9733;</span>' : ''}
+                    <div class="play-icon-overlay">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </div>
+                </div>
+                <div class="card-info">
+                    <div class="card-title">${esc(event.title)}</div>
+                    <div class="card-subtitle">${esc(meta)}</div>
+                </div>
+            </div>`;
     }
 
     /**
@@ -614,6 +703,10 @@ class HomePage {
             onSaved: () => {
                 this.forYouSignature = null;
                 this.renderForYou();
+                // New sports' fixtures are fetched in the background
+                this.renderLiveEvents();
+                clearTimeout(this.liveEventsTimer);
+                this.liveEventsTimer = setTimeout(() => this.renderLiveEvents(), 20000);
             }
         });
     }

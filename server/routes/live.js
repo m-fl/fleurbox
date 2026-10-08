@@ -13,9 +13,11 @@
 
 const express = require('express');
 const router = express.Router();
-const { sources } = require('../db');
+const { sources, settings: settingsDb } = require('../db');
 const { getDb } = require('../db/sqlite');
 const languages = require('../services/languages');
+const liveEvents = require('../services/liveEvents');
+const taste = require('../services/taste');
 
 const UNCATEGORIZED = 'Uncategorized';
 
@@ -274,6 +276,35 @@ router.post('/now', async (req, res) => {
     } catch (err) {
         console.error('[Live] Now playing failed:', err);
         res.status(500).json({ error: 'Failed to load programme info' });
+    }
+});
+
+/**
+ * GET /api/live/events?limit=
+ * Today's live and upcoming events on the user's channels, best first (their
+ * teams, then live, then upcoming by relevance; services/liveEvents.js).
+ * Each: { id, title, competition, sport, start, end, live, favourite, detail,
+ *         home, away, programme, channels[] } - channels shaped as above.
+ */
+router.get('/events', async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 60);
+        const sourceTypes = await liveSources();
+        const settings = await settingsDb.get();
+        const lang = settings.languagePriority || '';
+        const events = liveEvents.forUser(taste.getProfile(req.user.id), {
+            sourceIds: [...sourceTypes.keys()],
+            lang,
+            hard: !!(settings.languageHardFilter && lang),
+            limit
+        });
+        res.json(events.map(({ channelRows, ...e }) => ({
+            ...e,
+            channels: channelRows.map(r => toChannel(r, sourceTypes))
+        })));
+    } catch (err) {
+        console.error('[Live] Events failed:', err);
+        res.status(500).json({ error: 'Live events unavailable' });
     }
 });
 

@@ -111,7 +111,9 @@ const API = {
         channel: (sourceId, itemId) =>
             API.request('GET', `/live/channel?${new URLSearchParams({ sourceId, itemId })}`),
         // [{ tvgId, name }] -> [{ current, upcoming } | null]
-        now: (channels, full = false) => API.request('POST', '/live/now', { channels, full })
+        now: (channels, full = false) => API.request('POST', '/live/now', { channels, full }),
+        // Today's sports/live events on the user's channels, best first
+        events: (limit = 30) => API.request('GET', `/live/events?limit=${limit}`)
     },
 
     // Favorites

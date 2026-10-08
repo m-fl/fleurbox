@@ -233,6 +233,13 @@ app.listen(PORT, async () => {
         console.error('[TMDB] Resume check failed:', err);
     }
 
+    // Sports fixtures for Live Events (ESPN, no key needed)
+    try {
+        require('./services/liveEvents').start();
+    } catch (err) {
+        console.error('[Events] Start failed:', err);
+    }
+
     // Load plugins
     await loadPlugins().catch(err => {
         console.error('Plugin initialization failed:', err);
