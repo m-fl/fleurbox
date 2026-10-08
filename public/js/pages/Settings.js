@@ -375,19 +375,28 @@ class SettingsPage {
                 <tr>
                     <td>
                         <div style="display:flex;align-items:center;gap:8px;">
-                            <strong>${user.username}</strong>
+                            <strong>${escapeHtml(user.username)}</strong>
                             ${typeBadge}
                         </div>
                     </td>
-                    <td>${user.email || '<span class="hint">-</span>'}</td>
+                    <td>${user.email ? escapeHtml(user.email) : '<span class="hint">-</span>'}</td>
                     <td>${roleBadge}</td>
                     <td>${user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'}</td>
                     <td>
-                        <button class="btn btn-sm btn-secondary" onclick="window.app.pages.settings.openEditUserModal(${user.id})">Edit</button>
-                        <button class="btn btn-sm btn-error" onclick="window.app.pages.settings.deleteUser(${user.id}, '${user.username}')">Delete</button>
+                        <button class="btn btn-sm btn-secondary" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
+                        <button class="btn btn-sm btn-error" data-user-action="delete" data-user-id="${escapeHtml(user.id)}">Delete</button>
                     </td>
                 </tr>
             `}).join('');
+
+            userList.querySelectorAll('[data-user-action]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const user = users.find(u => String(u.id) === btn.dataset.userId);
+                    if (!user) return;
+                    if (btn.dataset.userAction === 'edit') this.openEditUserModal(user.id);
+                    else this.deleteUser(user.id, user.username);
+                });
+            });
         } catch (err) {
             console.error('Error loading users:', err);
             userList.innerHTML = '<tr><td colspan="5" class="hint">Error loading users</td></tr>';

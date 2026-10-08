@@ -10,9 +10,12 @@ require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Trust proxy headers (X-Forwarded-Proto, X-Forwarded-For, etc.)
-// Required for correct protocol detection behind reverse proxies (nginx, Caddy, etc.)
-app.set('trust proxy', true);
+// Proxy headers (X-Forwarded-For/-Proto) are trusted only from the proxies
+// named in TRUST_PROXY (Express syntax, e.g. "loopback" or "172.16.0.0/12"
+// for `tailscale serve` reaching the container through the Docker bridge).
+// Trusting everyone would let any client fake its IP and dodge the login
+// rate limit. Unset = no proxy in front.
+app.set('trust proxy', process.env.TRUST_PROXY || false);
 
 // Middleware
 app.use(express.json({ limit: '50mb' }));
@@ -20,12 +23,40 @@ app.use(express.json({ limit: '50mb' }));
 // Initialize Passport
 const session = require('express-session');
 app.use(session({
-    secret: process.env.JWT_SECRET || 'keyboard cat',
+    secret: process.env.JWT_SECRET,
     resave: false,
-    saveUninitialized: true
+    // Only the OIDC login flow stores anything in a session; don't create
+    // (and keep in memory forever) one for every visitor
+    saveUninitialized: false
 }));
 app.use(passport.initialize());
 app.use(passport.session());
+
+// Content-Security-Policy for the app's pages: scripts only from this site
+// and the pinned hls.js on jsdelivr - no inline scripts or on*="" handlers -
+// so text that slips into the page unescaped cannot run as code. Images,
+// media and fetches may go anywhere: streams play straight from providers.
+const APP_CSP = [
+    "default-src 'self'",
+    "script-src 'self' https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src * data: blob:",
+    "media-src * data: blob:",
+    "connect-src *",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'"
+].join('; ');
+app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/')) {
+        res.set('Content-Security-Policy', APP_CSP);
+        res.set('X-Content-Type-Options', 'nosniff');
+    }
+    next();
+});
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -169,6 +200,27 @@ process.on('SIGTERM', async () => {
 });
 
 // API Routes
+// API responses are data, never pages: stop browsers guessing a type
+// ("sniffing") and treating a mislabelled response as HTML or script
+app.use('/api', (req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    next();
+});
+
+// The login is a cookie, which the browser also sends when another site
+// (or another port on this host) submits a form or fetch to us. Changes
+// (anything but GET/HEAD/OPTIONS) must come from a page on this origin.
+app.use('/api', (req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    const origin = req.get('origin');
+    if (!origin) return next(); // not sent by a browser page (curl, server-to-server)
+    let originHost;
+    try { originHost = new URL(origin).host; } catch { originHost = null; }
+    const hosts = [req.get('host')];
+    if (process.env.TRUST_PROXY && req.get('x-forwarded-host')) hosts.push(req.get('x-forwarded-host'));
+    if (originHost && hosts.includes(originHost)) return next();
+    res.status(403).json({ error: 'Cross-site request refused' });
+});
 app.use('/api/auth', require('./routes/auth'));
 
 // Everything else under /api requires a valid token. /api/auth handles its own
@@ -192,6 +244,7 @@ app.use('/api/subtitle', require('./routes/subtitle'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/history', require('./routes/history'));
 app.use('/api/home', require('./routes/home'));
+app.use('/api/profile', require('./routes/profile'));
 app.use('/api/tmdb', require('./routes/tmdb'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/details', require('./routes/details'));

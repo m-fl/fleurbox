@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const { requireAdmin } = require('../auth');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
 const db = require('../db');
 const transcodeSession = require('../services/transcodeSession');
 const { redact } = require('../services/redact');
+const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
 
 /**
  * Transcode Routes
@@ -29,7 +31,7 @@ transcodeSession.startCleanupInterval();
  * POST /api/transcode/session
  * Body: { url: string, seekOffset?: number }
  */
-router.post('/session', async (req, res) => {
+router.post('/session', requireAllowedUrl, async (req, res) => {
     const { url, seekOffset, videoMode, videoCodec, audioCodec, audioChannels, audioTrack } = req.body;
 
     if (!url) {
@@ -166,7 +168,8 @@ router.delete('/:sessionId', async (req, res) => {
  * List all active sessions (for debugging)
  * GET /api/transcode/sessions
  */
-router.get('/sessions', (req, res) => {
+// Admin only: the session list shows source URLs, which carry provider logins
+router.get('/sessions', requireAdmin, (req, res) => {
     res.json(transcodeSession.getAllSessions());
 });
 
@@ -177,7 +180,7 @@ router.get('/sessions', (req, res) => {
  * Transcodes audio to AAC for browser compatibility while passing video through.
  * This fixes playback issues with Dolby/AC3/EAC3 audio that browsers can't decode.
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAllowedUrl, async (req, res) => {
     const { url, audioTrack } = req.query;
     if (!url) {
         return res.status(400).json({ error: 'URL parameter is required' });
@@ -218,6 +221,7 @@ router.get('/', async (req, res) => {
         '-reconnect_delay_max', '3',
         // Prevent Range/HEAD requests that some providers reject with 405
         '-seekable', '0',
+        ...FFMPEG_PROTOCOLS,
         '-i', url,
         // Map only first video and audio stream (avoid subtitle streams causing issues)
         '-map', '0:v:0',

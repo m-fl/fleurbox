@@ -271,14 +271,16 @@ router.delete('/taste', (req, res) => {
 });
 
 /**
- * GET /api/home/sports/teams?sports=soccer,hockey&regions=belgium,england
+ * GET /api/home/sports/teams?sports=soccer,hockey&regions=belgium,england&divisions=american-football:college
  * Teams the quiz offers for those sports/regions: [{ key, name, short, logo, league }].
  * The first request for a league fetches its teams from ESPN (then weekly).
  */
 router.get('/sports/teams', async (req, res) => {
     try {
         const list = v => String(v || '').split(',').filter(Boolean);
-        res.json(await liveEvents.teams({ sports: list(req.query.sports), regions: list(req.query.regions) }));
+        res.json(await liveEvents.teams({
+            sports: list(req.query.sports), regions: list(req.query.regions), divisions: list(req.query.divisions)
+        }));
     } catch (err) {
         console.error('[Home] Sports teams failed:', err);
         res.status(500).json({ error: 'Teams unavailable' });

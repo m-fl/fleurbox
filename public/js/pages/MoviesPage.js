@@ -299,8 +299,8 @@ class MoviesPage {
 
             card.innerHTML = `
                 <div class="movie-poster">
-                    <img src="${poster}" alt="${movie.name}" 
-                         onerror="this.onerror=null;this.src='/img/placeholder.png'" loading="lazy">
+                    <img src="${escapeHtml(poster)}" alt="${escapeHtml(movie.name)}" 
+                         data-fallback="/img/placeholder.png" loading="lazy">
                     <div class="movie-play-overlay">
                         <span class="play-icon">${Icons.play}</span>
                     </div>
@@ -309,7 +309,7 @@ class MoviesPage {
                     </button>
                 </div>
                 <div class="movie-info">
-                    <div class="movie-title">${movie.name}</div>
+                    <div class="movie-title">${escapeHtml(movie.name)}</div>
                     <div class="movie-meta">
                         ${year ? `<span>${year}</span>` : ''}
                         ${rating ? `<span>${rating}</span>` : ''}
@@ -371,7 +371,10 @@ class MoviesPage {
      * Details panel: shows the list data at once, then fills in vod_info
      * (plot, genre, runtime, credits) and the playlist category
      */
-    /** opts.from: 'home' | 'search' when opened from Home (sets the Back target) */
+    /**
+     * opts.from: 'home' | 'search' when opened from Home (sets the Back target).
+     * opts.variants: the title's copies, already loaded (switching source).
+     */
     async showMovieDetails(movie, opts = {}) {
         this.currentMovie = movie;
         this.detailsFrom = opts.from || null;
@@ -394,6 +397,7 @@ class MoviesPage {
         metaEl.innerHTML = ContentDetails.metaHtml({ rating: movie.rating, year: movie.year }, '');
         plotEl.textContent = movie.plot || '';
         creditsEl.innerHTML = '<div class="loading"><div class="loading-spinner"></div></div>';
+        this.renderSources(movie, opts.variants, token);
 
         // Stored TMDB record first: local, no outside call
         const local = await ContentDetails.local('movie', movie.sourceId, movie.stream_id);
@@ -420,6 +424,31 @@ class MoviesPage {
         metaEl.innerHTML = ContentDetails.metaHtml({ ...info, rating: info.rating || movie.rating }, category);
         plotEl.textContent = info.plot || info.description || movie.plot || '';
         creditsEl.innerHTML = ContentDetails.creditsHtml(info);
+    }
+
+    /**
+     * Source picker: the same film in other categories (languages, 4K, ...).
+     * Picking one reopens the panel on that copy, so Play uses it.
+     */
+    async renderSources(movie, variants, token) {
+        const el = document.getElementById('movie-sources');
+        if (!variants) {
+            el?.classList.add('hidden');
+            variants = await ContentDetails.variants('movie', movie.sourceId, movie.stream_id);
+            if (token !== this.detailsToken) return;
+        }
+        ContentDetails.renderSources(el, variants, movie.sourceId, movie.stream_id, v => {
+            this.showMovieDetails({
+                stream_id: v.itemId,
+                sourceId: v.sourceId,
+                name: v.name,
+                stream_icon: v.streamIcon || movie.stream_icon,
+                rating: v.rating || movie.rating,
+                year: v.year || movie.year,
+                category_id: v.categoryId,
+                container_extension: v.containerExtension
+            }, { from: this.detailsFrom, variants });
+        });
     }
 
     hideDetails() {

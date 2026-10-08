@@ -10,6 +10,7 @@
  * responses up to MAX_BYTES are stored.
  */
 
+const { guardedFetch } = require('./urlGuard');
 const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -50,7 +51,7 @@ async function readEntry(url) {
 
 async function download(url) {
     if (isTmdb(url)) tmdbStats.record('images');
-    const res = await fetch(url, {
+    const res = await guardedFetch(url, {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'image/*,*/*;q=0.8'
@@ -62,9 +63,23 @@ async function download(url) {
         err.status = res.status;
         throw err;
     }
-    const type = (res.headers.get('content-type') || '').split(';')[0].trim();
+    const declared = (res.headers.get('content-type') || '').split(';')[0].trim();
     const body = Buffer.from(await res.arrayBuffer());
+    // Some logo hosts send images as octet-stream or with no type at all
+    const type = declared.toLowerCase().startsWith('image/') ? declared : (sniff(body) || declared);
     return { type, body };
+}
+
+/** Image type from the file's first bytes, or null */
+function sniff(body) {
+    const hex = body.subarray(0, 12).toString('hex');
+    if (hex.startsWith('89504e47')) return 'image/png';
+    if (hex.startsWith('ffd8ff')) return 'image/jpeg';
+    if (hex.startsWith('47494638')) return 'image/gif';
+    if (hex.startsWith('52494646') && hex.slice(16, 24) === '57454250') return 'image/webp';
+    if (hex.startsWith('00000100')) return 'image/x-icon';
+    if (hex.startsWith('424d')) return 'image/bmp';
+    return null;
 }
 
 async function store(url, type, body) {

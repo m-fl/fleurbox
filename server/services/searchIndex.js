@@ -61,6 +61,23 @@ const TMDB_JOIN = `LEFT JOIN tmdb_meta m ON m.status = 'ok'
 // categories.id is "sourceId:categoryId" (unique per source, whatever the type),
 // so join on the primary key
 const CATEGORY_JOIN = `LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id`;
+// One search result per title: the provider files the same film/show in many
+// categories (languages, 4K, Netflix, top lists...), all carrying the same TMDB
+// id. Rows without one (and live channels) stay separate.
+const TMDB_ID = `IFNULL(CAST(json_extract(p.data, '$.tmdb') AS TEXT), '')`;
+const GROUP_KEY = `CASE WHEN p.type <> 'live' AND ${TMDB_ID} NOT IN ('', '0')
+    THEN ${TMDB_KIND} || ':' || ${TMDB_ID} ELSE 'row:' || p.rowid END`;
+// Over a `ranked` CTE (rows + group_key + pos = rank): each group's best-ranked
+// row, in rank order, with `variants` = how many copies matched
+const GROUPED_SELECT = `
+    SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY pos) AS group_pos,
+            COUNT(*) OVER (PARTITION BY group_key) AS variants
+        FROM ranked
+    )
+    WHERE group_pos = 1
+    ORDER BY pos
+    LIMIT @limit OFFSET @offset`;
 
 class SearchIndex {
     constructor() {
@@ -302,52 +319,62 @@ class SearchIndex {
                     ORDER BY score
                     LIMIT ${deep ? CANDIDATES_FILTERED : CANDIDATES}
                 )
-                SELECT p.*, c.name AS category_name,
-                    COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
-                    ${YEAR_SQL} AS release_year,
-                    m.vote_average AS tmdb_rating,
-                    m.fame AS tmdb_fame,
-                    h.score AS score
-                FROM hits h
-                JOIN playlist_items p ON p.rowid = h.rowid
-                ${CATEGORY_JOIN}
-                ${TMDB_JOIN}
-                WHERE ${filterSql}
-                ORDER BY
-                    CASE WHEN @title <> '' AND instr(lower(p.name), @title) > 0 THEN 0 ELSE 1 END,
-                    CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END,
-                    -- Only fields searched (cast:, director:, genre:, ...): every hit
-                    -- matches about equally, so the best-known titles lead.
-                    -- With plain words, relevance leads and fame nudges.
-                    CASE WHEN @title = '' THEN -IFNULL(m.fame, 0) ELSE 0 END,
-                    h.score - ${FAME_WEIGHT} * IFNULL(m.fame, 0)
-                LIMIT @limit OFFSET @offset
+                , ranked AS (
+                    SELECT p.*, c.name AS category_name,
+                        COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
+                        ${YEAR_SQL} AS release_year,
+                        m.vote_average AS tmdb_rating,
+                        m.fame AS tmdb_fame,
+                        h.score AS score,
+                        ${GROUP_KEY} AS group_key,
+                        ROW_NUMBER() OVER (ORDER BY
+                            CASE WHEN @title <> '' AND instr(lower(p.name), @title) > 0 THEN 0 ELSE 1 END,
+                            CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END,
+                            -- Only fields searched (cast:, director:, genre:, ...): every hit
+                            -- matches about equally, so the best-known titles lead.
+                            -- With plain words, relevance leads and fame nudges.
+                            CASE WHEN @title = '' THEN -IFNULL(m.fame, 0) ELSE 0 END,
+                            h.score - ${FAME_WEIGHT} * IFNULL(m.fame, 0)
+                        ) AS pos
+                    FROM hits h
+                    JOIN playlist_items p ON p.rowid = h.rowid
+                    ${CATEGORY_JOIN}
+                    ${TMDB_JOIN}
+                    WHERE ${filterSql}
+                )
+                ${GROUPED_SELECT}
             `).all({ ...params, match: `(${parsed.match}) AND (ftype : "type${type}")` });
         } else {
             // Year filter only (e.g. "year:>2020", "date:2007< -horror"): no text to
             // rank by, so priority language first, then newest first
             rows = getDb().prepare(`
-                SELECT p.*, c.name AS category_name,
-                    COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
-                    ${YEAR_SQL} AS release_year,
-                    m.vote_average AS tmdb_rating,
-                    m.fame AS tmdb_fame,
-                    0 AS score
-                FROM playlist_items p
-                ${CATEGORY_JOIN}
-                ${TMDB_JOIN}
-                WHERE p.type = @type
-                  AND ${filterSql}
-                  AND (@exclude IS NULL OR p.rowid NOT IN (SELECT rowid FROM ${TABLE} WHERE ${TABLE} MATCH @exclude))
-                ORDER BY
-                    CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END,
-                    release_year DESC,
-                    p.name
-                LIMIT @limit OFFSET @offset
+                WITH base AS (
+                    SELECT p.*, c.name AS category_name,
+                        COALESCE(m.overview, json_extract(p.data, '$.plot')) AS overview,
+                        ${YEAR_SQL} AS release_year,
+                        m.vote_average AS tmdb_rating,
+                        m.fame AS tmdb_fame,
+                        0 AS score,
+                        ${GROUP_KEY} AS group_key
+                    FROM playlist_items p
+                    ${CATEGORY_JOIN}
+                    ${TMDB_JOIN}
+                    WHERE p.type = @type
+                      AND ${filterSql}
+                      AND (@exclude IS NULL OR p.rowid NOT IN (SELECT rowid FROM ${TABLE} WHERE ${TABLE} MATCH @exclude))
+                ), ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (ORDER BY
+                        CASE WHEN lang_match(name, category_name, @lang) = 1 THEN 0 ELSE 1 END,
+                        release_year DESC,
+                        name
+                    ) AS pos
+                    FROM base
+                )
+                ${GROUPED_SELECT}
             `).all({ ...params, type, exclude: parsed.exclude });
         }
 
-        const items = rows.slice(0, limit).map(row => {
+        const items = rows.slice(0, limit).map(({ pos, group_pos, ...row }) => {
             const data = row.data ? JSON.parse(row.data) : {};
             const year = row.release_year ? String(row.release_year) : '';
             return {

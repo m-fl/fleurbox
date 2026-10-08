@@ -280,9 +280,10 @@ router.post('/now', async (req, res) => {
 });
 
 /**
- * GET /api/live/events?limit=
- * Today's live and upcoming events on the user's channels, best first (their
- * teams, then live, then upcoming by relevance; services/liveEvents.js).
+ * GET /api/live/events?limit=&mine=1
+ * Live and upcoming events, best first: the user's teams, their leagues and
+ * sports, then other events on their channels (services/liveEvents.js).
+ * mine=1 leaves the others out for users who follow something.
  * Each: { id, title, competition, sport, start, end, live, favourite, detail,
  *         home, away, programme, channels[] } - channels shaped as above.
  */
@@ -296,7 +297,9 @@ router.get('/events', async (req, res) => {
             sourceIds: [...sourceTypes.keys()],
             lang,
             hard: !!(settings.languageHardFilter && lang),
-            limit
+            limit,
+            // Home: only what the user follows, once they've picked sports/teams
+            mine: req.query.mine === '1'
         });
         res.json(events.map(({ channelRows, ...e }) => ({
             ...e,

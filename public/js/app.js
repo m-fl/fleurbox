@@ -23,6 +23,8 @@ class App {
         this.pages.series = new SeriesPage(this);
         this.pages.settings = new SettingsPage(this);
         this.pages.watch = new WatchPage(this);
+        this.pages.profile = new ProfilePage(this);
+        this.pages.event = new EventPage(this);
 
         this.init();
     }
@@ -41,8 +43,8 @@ class App {
                 navbarMenu.classList.toggle('active');
             });
 
-            // Close menu when a nav link is clicked
-            document.querySelectorAll('.nav-link').forEach(link => {
+            // Close menu when a nav link (or the logo, which goes Home) is clicked
+            document.querySelectorAll('.nav-link, #navbar-brand').forEach(link => {
                 link.addEventListener('click', () => {
                     mobileMenuToggle.classList.remove('active');
                     navbarMenu.classList.remove('active');
@@ -115,6 +117,12 @@ class App {
             });
         });
 
+        // The logo is the way Home (there's no Home link)
+        document.getElementById('navbar-brand')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            this.navigateTo('home');
+        });
+
         // Now Playing indicator
         const nowPlayingBtn = document.getElementById('now-playing-indicator');
         if (nowPlayingBtn) {
@@ -152,6 +160,12 @@ class App {
                 });
                 return;
             }
+            if (page === 'event' && route.length) {
+                this.pages.event.openFromRoute(route).then(ok => {
+                    if (!ok) this.navigateTo('home', true);
+                });
+                return;
+            }
             const target = this.pages[page] ? page : (e.state?.page || 'home');
             this.navigateTo(target, true); // replace = don't add a history entry
         });
@@ -165,9 +179,12 @@ class App {
         // Navigate to the page from URL hash, or default to home
         // A #watch/<type>/<source>/<id...> link starts that video
         const [page, ...route] = window.location.hash.slice(1).split('/'); // Remove #
+        // and #event/<id> opens that live event
         const playedRoute = page === 'watch' && route.length &&
             await this.pages.watch.playFromRoute(route);
-        if (!playedRoute) {
+        const openedRoute = !playedRoute && page === 'event' && route.length &&
+            await this.pages.event.openFromRoute(route);
+        if (!playedRoute && !openedRoute) {
             const initialPage = page && this.pages[page] ? page : 'home';
             this.navigateTo(initialPage, true); // true = replace history (don't add)
         }
@@ -176,21 +193,13 @@ class App {
     }
 
     async checkAuth() {
-        const token = localStorage.getItem('authToken');
-
-        if (!token) {
-            // No token, redirect to login (replace to avoid back button issues)
-            window.location.replace('/login.html');
-            return;
-        }
+        // The login lives in an httpOnly cookie that page scripts cannot read
+        // (so an XSS bug cannot steal it); older versions kept it here
+        try { localStorage.removeItem('authToken'); } catch { /* storage blocked */ }
 
         try {
-            // Verify token with server
-            const response = await fetch('/api/auth/me', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
+            // Verify the session with the server
+            const response = await fetch('/api/auth/me');
 
             if (!response.ok) {
                 throw new Error('Invalid token');
@@ -209,9 +218,11 @@ class App {
             // Add logout button to navbar
             this.addLogoutButton();
 
+            // This user's saved appearance (Profile page); not awaited
+            ProfilePage.loadAppearance();
+
         } catch (err) {
             console.error('Authentication error:', err);
-            localStorage.removeItem('authToken');
             window.location.replace('/login.html');
         }
     }
@@ -234,17 +245,7 @@ class App {
         logoutLink.addEventListener('click', async (e) => {
             e.preventDefault();
 
-            const token = localStorage.getItem('authToken');
-            if (token) {
-                await fetch('/api/auth/logout', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-            }
-
-            localStorage.removeItem('authToken');
+            await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
             window.location.replace('/login.html');
         });
 
@@ -257,8 +258,8 @@ class App {
             return;
         }
 
-        // Update browser history. The watch page's URL names the video playing.
-        const hash = pageName === 'watch' ? (this.pages.watch?.routeHash || 'watch') : pageName;
+        // Update browser history. The watch and event pages' URLs name what they show.
+        const hash = this.pages[pageName]?.routeHash || pageName;
         if (replaceHistory) {
             // Replace current history entry (used on initial load)
             history.replaceState({ page: pageName }, '', `#${hash}`);
@@ -294,13 +295,4 @@ class App {
 // Start app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new App();
-
-    // Fetch and display version badge
-    fetch('/api/version')
-        .then(res => res.json())
-        .then(data => {
-            const badge = document.getElementById('version-badge');
-            if (badge && data.version) badge.textContent = `v${data.version}`;
-        })
-        .catch(() => { });
 });

@@ -12,8 +12,9 @@
  *  - 429 -> every worker pauses for Retry-After; MAX_RATE_LIMIT_RETRIES 429s in a
  *    row (across all workers) -> stop ('rate_limited')
  *  - 401 -> stop ('auth_failed'); MAX_CONSECUTIVE_ERRORS network/5xx in a row -> stop ('errors')
- * TMDB terms: cached data may be kept at most 6 months, so rows older than
- * REFRESH_AFTER_DAYS are re-fetched on the next run.
+ * A title is fetched once: stored rows (including 'not_found') are never
+ * re-fetched. Vote counts, the only part that drifts, are kept current by
+ * tmdbPopularity's rolling most-rated crawl.
  *
  * State is persisted in `tmdb_sync_state`, so progress survives restarts and a
  * run interrupted by a restart resumes on startup.
@@ -29,7 +30,6 @@ const MAX_RATE_LIMIT_RETRIES = 3;         // consecutive 429s before stopping
 const DEFAULT_RETRY_AFTER_S = 10;
 const MAX_CONSECUTIVE_ERRORS = 20;
 const MAX_ERROR_RETRIES = 3;              // per item, for network/5xx
-const REFRESH_AFTER_DAYS = 150;           // < TMDB's 6-month cache limit
 const CAST_LIMIT = 15;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -112,11 +112,10 @@ class TmdbSync {
 
     /**
      * Distinct (kind, tmdb_id) pairs in the playlist that are missing from
-     * tmdb_meta or older than the refresh window
+     * tmdb_meta
      */
     pendingWork() {
         this.ensureTables();
-        const staleBefore = Math.floor(Date.now() / 1000) - REFRESH_AFTER_DAYS * 86400;
         return getDb().prepare(`
             WITH wanted AS (
                 -- The provider files ~10k series under type 'movie' (in series
@@ -132,9 +131,9 @@ class TmdbSync {
             )
             SELECT w.kind, w.tmdb_id FROM wanted w
             LEFT JOIN tmdb_meta m ON m.kind = w.kind AND m.tmdb_id = w.tmdb_id
-            WHERE m.tmdb_id IS NULL OR m.fetched_at < ?
+            WHERE m.tmdb_id IS NULL
             ORDER BY w.kind, CAST(w.tmdb_id AS INTEGER)
-        `).all(staleBefore);
+        `).all();
     }
 
     status() {

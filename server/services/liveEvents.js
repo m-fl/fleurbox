@@ -21,7 +21,9 @@
  * taste.CATALOG.regions; 'global' leagues ignore the user's regions. `top`
  * leagues are fetched for everyone and shown to users without sports picks.
  * `weight` ranks events for users who didn't pick that league. `teams: false`
- * keeps a league (cups, friendlies) out of the quiz's team picker.
+ * keeps a league (cups, friendlies) out of the quiz's team picker. `division`
+ * ('pro' | 'college') lets the quiz narrow a sport to one level; a sport whose
+ * leagues carry divisions gets that follow-up question (taste.CATALOG.divisions).
  */
 
 const { getDb } = require('../db/sqlite');
@@ -64,11 +66,11 @@ const LEAGUES = [
     { id: 'arg.1', path: 'soccer/arg.1', sport: 'soccer', label: 'Liga Profesional', regions: ['south-america'], weight: 4 },
     { id: 'conmebol.libertadores', path: 'soccer/conmebol.libertadores', sport: 'soccer', label: 'Libertadores', regions: ['south-america'], weight: 5 },
     // US sports. Team ids are per league (an NFL id can be a college id too)
-    { id: 'nfl', path: 'football/nfl', sport: 'american-football', label: 'NFL', regions: ['north-america'], top: true, weight: 8 },
-    { id: 'college-football', path: 'football/college-football', sport: 'american-football', label: 'College Football', regions: ['north-america'], weight: 4 },
-    { id: 'nba', path: 'basketball/nba', sport: 'basketball', label: 'NBA', regions: ['north-america'], top: true, weight: 7 },
-    { id: 'wnba', path: 'basketball/wnba', sport: 'basketball', label: 'WNBA', regions: ['north-america'], weight: 4 },
-    { id: 'mens-college-basketball', path: 'basketball/mens-college-basketball', sport: 'basketball', label: 'College Basketball', regions: ['north-america'], weight: 3 },
+    { id: 'nfl', path: 'football/nfl', sport: 'american-football', label: 'NFL', regions: ['north-america'], top: true, weight: 8, division: 'pro' },
+    { id: 'college-football', path: 'football/college-football', sport: 'american-football', label: 'College Football', regions: ['north-america'], weight: 4, division: 'college' },
+    { id: 'nba', path: 'basketball/nba', sport: 'basketball', label: 'NBA', regions: ['north-america'], top: true, weight: 7, division: 'pro' },
+    { id: 'wnba', path: 'basketball/wnba', sport: 'basketball', label: 'WNBA', regions: ['north-america'], weight: 4, division: 'pro' },
+    { id: 'mens-college-basketball', path: 'basketball/mens-college-basketball', sport: 'basketball', label: 'College Basketball', regions: ['north-america'], weight: 3, division: 'college' },
     { id: 'nhl', path: 'hockey/nhl', sport: 'hockey', label: 'NHL', regions: ['north-america'], top: true, weight: 6 },
     { id: 'mlb', path: 'baseball/mlb', sport: 'baseball', label: 'MLB', regions: ['north-america'], top: true, weight: 6 },
     // No two sides: matched by keyword instead of team names
@@ -86,6 +88,10 @@ const F1_SESSIONS = { FP1: ['Practice 1', 60], FP2: ['Practice 2', 60], FP3: ['P
 const REFRESH_EVERY_MS = 30 * 60 * 1000;
 const TEAMS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
+// How far ahead favourite teams' games are shown (other events: the next 24h)
+const TEAM_DAYS = 8;
+// ...and leagues someone follows (fetched this many days ahead)
+const LEAGUE_DAYS = 5;
 const HOUR = 60 * 60 * 1000;
 
 // ===================== Storage =====================
@@ -154,17 +160,27 @@ function savedProfiles() {
 }
 
 /**
- * Leagues for a profile's sports. Regions narrow a sport only when one of the
- * picked regions has leagues in that sport; otherwise its top leagues are used.
+ * Leagues for a profile's sports. Divisions ("american-football:college")
+ * narrow a sport to those levels first; none picked means the top league's
+ * level. Regions narrow it only when one of the
+ * picked regions has leagues in that sport; otherwise its top leagues are used
+ * (or all of them when the chosen levels have no top league).
  */
 function leaguesFor(profile) {
     const sports = profile?.sports || [];
     const regions = new Set(profile?.regions || []);
+    const divisions = profile?.divisions || [];
     const out = new Set();
     for (const sport of sports) {
-        const inSport = LEAGUES.filter(l => l.sport === sport);
+        let levels = divisions.filter(d => d.startsWith(`${sport}:`)).map(d => d.slice(sport.length + 1));
+        const chosen = levels.length > 0;
+        // No level picked: the level of the sport's top league (NFL/NBA, not college)
+        if (!chosen) levels = LEAGUES.filter(l => l.sport === sport && l.top && l.division).map(l => l.division);
+        const inSport = LEAGUES.filter(l => l.sport === sport && (!levels.length || !l.division || levels.includes(l.division)));
         const regional = inSport.filter(l => l.regions.some(r => regions.has(r)));
-        const picked = regional.length ? regional : inSport.filter(l => l.top);
+        const top = inSport.filter(l => l.top);
+        // Picked levels mean every league at them ("Professional" = NBA and WNBA)
+        const picked = regional.length ? regional : chosen || !top.length ? inSport : top;
         picked.forEach(l => out.add(l.id));
         inSport.filter(l => l.regions.includes('global')).forEach(l => out.add(l.id));
     }
@@ -194,6 +210,7 @@ function side(competitor) {
     const team = competitor?.team || competitor?.athlete || {};
     return {
         id: team.id ? String(team.id) : null,
+        abbr: team.abbreviation || '',
         name: team.displayName || team.name || '',
         short: team.shortDisplayName || team.displayName || '',
         nick: team.name || '',
@@ -227,6 +244,8 @@ function toRows(league, event) {
     const start = Date.parse(event.date);
     if (!start || dead) return rows;
     const comp = event.competitions?.[0] || {};
+    // Not scheduled yet: ESPN puts a placeholder time (midnight US Eastern)
+    const timeTbd = comp.timeValid === false || event.timeValid === false;
     const competitors = comp.competitors || [];
     const home = competitors.find(c => c.homeAway === 'home') || competitors[0];
     const away = competitors.find(c => c.homeAway === 'away') || competitors[1];
@@ -243,10 +262,32 @@ function toRows(league, event) {
                 : `${side(away).short} @ ${side(home).short}`,
             home: twoSides ? side(home) : null,
             away: twoSides ? side(away) : null,
-            detail: status.shortDetail || ''
+            detail: status.shortDetail || '',
+            note: comp.notes?.[0]?.headline || '',
+            timeTbd
         }
     });
     return rows;
+}
+
+/**
+ * Favourite teams from all profiles, each with the league its schedule is
+ * fetched from (a domestic league rather than a cup/European list)
+ */
+function favouriteTeams() {
+    const keys = [...new Set(savedProfiles().flatMap(p => p.teams || []))];
+    if (!keys.length) return [];
+    ensureTables();
+    const rows = getDb().prepare(`SELECT team_key, league FROM sports_teams WHERE team_key IN (SELECT value FROM json_each(?))`)
+        .all(JSON.stringify(keys));
+    const out = new Map();
+    for (const { team_key: key, league: id } of rows) {
+        const league = leagueById.get(id);
+        if (!league) continue;
+        const domestic = !league.regions.some(r => r === 'europe' || r === 'international');
+        if (!out.has(key) || (domestic && !out.get(key).domestic)) out.set(key, { key, league, domestic });
+    }
+    return [...out.values()];
 }
 
 function ymd(ms) {
@@ -260,8 +301,9 @@ async function refresh() {
         ensureTables();
         const now = Date.now();
         // ESPN's day is US time: yesterday's late games can still be on
-        const days = [ymd(now - 24 * HOUR), ymd(now), ymd(now + 24 * HOUR)];
+        const days = n => Array.from({ length: n + 1 }, (_, i) => ymd(now + (i - 1) * 24 * HOUR));
         const leagues = wantedLeagues();
+        const followed = new Set(savedProfiles().flatMap(p => [...leaguesFor(p), ...teamLeagues(p.teams)]));
         const db = getDb();
         const upsert = db.prepare(`
             INSERT OR REPLACE INTO live_events (id, league, start_time, end_time, state, json, fetched_at)
@@ -269,14 +311,38 @@ async function refresh() {
         `);
         let stored = 0;
         let failed = 0;
-        const jobs = leagues.flatMap(league => days.map(day => ({ league, day })));
+        const store = (league, rows) => db.transaction(() => rows.forEach(r => upsert.run({
+            ...r, league: league.id, json: JSON.stringify(r.json), fetchedAt: Date.now()
+        })))();
+        // Favourite teams: their own schedule, so games after tomorrow show too
+        const teams = favouriteTeams();
+        await eachLimited(teams, 4, async ({ key, league }) => {
+            try {
+                const teamId = key.split(':')[1];
+                const fixture = league.sport === 'soccer' ? '?fixture=true' : '';
+                const body = await espn(`${league.path}/teams/${teamId}/schedule${fixture}`);
+                for (const e of body.events || []) {
+                    const t = Date.parse(e.date);
+                    if (!t || t < now - 6 * HOUR || t > now + TEAM_DAYS * 24 * HOUR) continue;
+                    // A cup or European game is filed under its own competition
+                    const own = leagueById.get(e.league?.slug) || league;
+                    const rows = toRows(own, e);
+                    store(own, rows);
+                    stored += rows.length;
+                }
+            } catch (err) {
+                failed++;
+                if (failed <= 3) console.warn(`[Events] Schedule for ${key} failed:`, err.message);
+            }
+        });
+
+        const jobs = leagues.flatMap(league =>
+            days(followed.has(league.id) ? LEAGUE_DAYS : 2).map(day => ({ league, day })));
         await eachLimited(jobs, 4, async ({ league, day }) => {
             try {
                 const body = await espn(`${league.path}/scoreboard?dates=${day}&limit=300`);
                 const rows = (body.events || []).flatMap(e => toRows(league, e));
-                db.transaction(() => rows.forEach(r => upsert.run({
-                    ...r, league: league.id, json: JSON.stringify(r.json), fetchedAt: Date.now()
-                })))();
+                store(league, rows);
                 stored += rows.length;
             } catch (err) {
                 failed++;
@@ -285,7 +351,7 @@ async function refresh() {
         });
         db.prepare('DELETE FROM live_events WHERE end_time < ?').run(now - 24 * HOUR);
         snapshot = null;
-        console.log(`[Events] ${stored} fixtures from ${leagues.length} leagues${failed ? ` (${failed} requests failed)` : ''}`);
+        console.log(`[Events] ${stored} fixtures from ${leagues.length} leagues and ${teams.length} team schedules${failed ? ` (${failed} requests failed)` : ''}`);
     })().finally(() => { refreshing = null; });
     return refreshing;
 }
@@ -322,11 +388,11 @@ function loadTeams(league) {
 }
 
 /**
- * Teams to pick from for the given sports/regions (fetched on first use).
+ * Teams to pick from for the given sports/regions/divisions (fetched on first use).
  * Returns [{ key, name, short, logo, league }] sorted by name, one per team.
  */
-async function teams({ sports = [], regions = [] }) {
-    const leagues = [...leaguesFor({ sports, regions })]
+async function teams({ sports = [], regions = [], divisions = [] }) {
+    const leagues = [...leaguesFor({ sports, regions, divisions })]
         .map(id => leagueById.get(id))
         .filter(l => l && l.teams !== false);
     await eachLimited(leagues, 4, loadTeams);
@@ -369,6 +435,10 @@ const GENERIC = new Set(['united', 'city', 'real', 'sporting', 'athletic', 'club
 // Club-type abbreviations around football names ("RSC Anderlecht", "Club Brugge KV")
 const CLUB_AFFIXES = /\b(fc|cf|sc|afc|ac|as|ss|ssc|sv|vfb|vfl|tsg|rc|rcd|cd|ud|sd|kv|krc|kaa|kas|rsc|rfc|fk|sk|bk|if|ca|club|de|1)\b/g;
 
+// Other spellings guides use for ESPN's abbreviations ("CLE vs CWS"); only
+// three-letter forms, as two letters match too much
+const ABBR_ALIASES = { CHW: ['CWS'], WSH: ['WSN', 'WAS'], KC: ['KCR'], SD: ['SDP'], SF: ['SFG'], TB: ['TBR'], ARI: ['AZD'] };
+
 /** Name variants (normalized, unpadded) that identify one side in a title */
 function variants(s) {
     const out = new Set();
@@ -378,9 +448,11 @@ function variants(s) {
     const location = norm(s.location).trim();
     const rest = location && name.startsWith(`${location} `) ? name.slice(location.length + 1) : '';
     const ambiguous = rest && rest.split(' ').every(w => GENERIC.has(w));
-    for (const raw of [s.name, s.short, s.nick, ambiguous ? '' : s.location]) {
+    // Abbreviations ("CLE vs CWS") only count with both sides named, like everything else
+    for (const raw of [s.name, s.short, s.nick, s.abbr, ambiguous ? '' : s.location]) {
         const v = norm(raw).trim();
-        if (v.length >= 4 && !GENERIC.has(v)) out.add(v);
+        if ((v.length >= 4 || (raw === s.abbr && v.length === 3)) && !GENERIC.has(v)) out.add(v);
+        if (raw === s.abbr) (ABBR_ALIASES[s.abbr] || []).forEach(a => out.add(a.toLowerCase()));
         const bare = v.replace(CLUB_AFFIXES, ' ').replace(/\s+/g, ' ').trim();
         if (bare.length >= 4 && !GENERIC.has(bare)) out.add(bare);
     }
@@ -417,6 +489,10 @@ const FIXTURE = /^(?:([^:]{2,60}):\s*)?([\p{Lu}0-9][^:]{1,40}?)\s*(\s[-–]\s|\s
 const FIXTURE_TIGHT = /^(?:([^:]{2,60}):\s*)?([\p{Lu}0-9][^:]{1,40}?)((?<=\p{L})-(?=\p{Lu}))([\p{Lu}0-9][^:]{1,40}?)(?:,.*)?$/u;
 // A lower-case word ("Journal avec Azeb Wolde-Giorghis"): a sentence, not a club name
 const LOWER_WORD = /(?:^|\s)\p{Ll}/u;
+// Lower-case words club names do have ("Atlético de Madrid", "Paris Saint-Germain")
+const NAME_PARTICLES = new Set(['de', 'del', 'des', 'la', 'le', 'les', 'van', 'von', 'der', 'den', 'da', 'do', 'di', 'du', 'y', 'i', 'e', 'et', '&']);
+/** "CBC Newsroom with Andrew Nichols": a lower-case word that isn't a name particle */
+const sentenceLike = text => text.split(/\s+/).some(w => /^\p{Ll}/u.test(w) && !NAME_PARTICLES.has(w));
 
 // "... Etapa 9", "... Round 4" after the second side
 const ROUND_SUFFIX = /\s+(?:etapa|round|rd|week|matchday|speeldag|spieltag|jornada|giornata|kolo|runda|journee|g)\s*\d+.*$/i;
@@ -442,6 +518,8 @@ function guideFixture(title) {
     away = away.replace(ROUND_SUFFIX, '').trim();
     // An unspaced hyphen is also a double-barrelled surname; trust it only between names
     if (sep === '-' && (LOWER_WORD.test(home) || LOWER_WORD.test(away))) return null;
+    // Any separator: a sentence on either side is a show title ("... with X - Live from Toronto")
+    if (sentenceLike(home) || sentenceLike(away)) return null;
     return { title: `${home} vs ${away}`, competition: competition.trim(), sides: [home, away] };
 }
 
@@ -503,7 +581,7 @@ function channelsByEpgId(enabledSourceIds) {
 
 // ===================== Snapshot =====================
 
-let snapshot = null; // { at, key, events }
+let snapshot = null; // { at, sources, lastSync, events, channels }
 
 /**
  * All current/upcoming events (next 24h) that are on at least one channel.
@@ -520,7 +598,7 @@ function buildSnapshot(enabledSourceIds) {
 
     const stored = getDb().prepare(`
         SELECT * FROM live_events WHERE end_time > ? AND start_time < ? ORDER BY start_time
-    `).all(now - 2 * HOUR, horizon);
+    `).all(now - 2 * HOUR, now + TEAM_DAYS * 24 * HOUR);
 
     const events = [];
     const claimed = new Set(); // programmes already used by an ESPN event
@@ -538,7 +616,8 @@ function buildSnapshot(enabledSourceIds) {
         const homeV = data.home ? variants(data.home) : null;
         const awayV = data.away ? variants(data.away) : null;
         const keywords = (league.keywords || []).map(k => norm(k));
-        for (let i = lowerBound(programmes, t - 2 * HOUR); i < programmes.length; i++) {
+        // A placeholder time says nothing about when it airs
+        for (let i = data.timeTbd ? programmes.length : lowerBound(programmes, t - 2 * HOUR); i < programmes.length; i++) {
             const p = programmes[i];
             if (p.start_time > t + 30 * 60000) break;
             if (p.end_time <= t + 15 * 60000) continue;
@@ -547,8 +626,8 @@ function buildSnapshot(enabledSourceIds) {
                 : keywords.some(k => p.norm.includes(k)) && p.start_time >= t - 45 * 60000;
             if (match) hits.push(p);
         }
+        // Kept without channels too: a followed team's game shows before the guide lists it
         const epgIds = onChannels(hits);
-        if (!epgIds.length) continue;
         hits.forEach(p => claimed.add(p));
         events.push({
             id: row.id,
@@ -562,9 +641,11 @@ function buildSnapshot(enabledSourceIds) {
             detail: data.detail,
             home: data.home,
             away: data.away,
+            note: data.note || '',
+            timeTbd: !!data.timeTbd,
             guideOnly: false,
             epgIds,
-            programme: hits[0].title
+            programme: hits[0]?.title || ''
         });
     }
 
@@ -606,12 +687,31 @@ function buildSnapshot(enabledSourceIds) {
     return { events, channels };
 }
 
+/**
+ * Source syncs as { syncing, lastSync }. A sync deletes a source's channels
+ * and EPG programmes and re-imports them, so matching meanwhile finds little.
+ */
+function syncState() {
+    try {
+        const rows = getDb().prepare('SELECT status, last_sync FROM sync_status').all();
+        return { syncing: rows.some(r => r.status === 'syncing'), lastSync: Math.max(0, ...rows.map(r => r.last_sync)) };
+    } catch {
+        return { syncing: false, lastSync: 0 }; // no sync has run yet
+    }
+}
+
 function getSnapshot(enabledSourceIds) {
-    const key = JSON.stringify(enabledSourceIds);
-    if (!snapshot || snapshot.key !== key || Date.now() - snapshot.at > SNAPSHOT_MAX_AGE_MS) {
+    const sync = syncState();
+    const sources = JSON.stringify(enabledSourceIds);
+    // Mid-sync: keep the last good snapshot rather than one built from a half-imported EPG
+    if (snapshot && sync.syncing && snapshot.sources === sources) return snapshot;
+    if (!snapshot || snapshot.sources !== sources || snapshot.lastSync !== sync.lastSync
+        || Date.now() - snapshot.at > SNAPSHOT_MAX_AGE_MS) {
         const started = Date.now();
-        snapshot = { at: Date.now(), key, ...buildSnapshot(enabledSourceIds) };
-        console.log(`[Events] Matched ${snapshot.events.length} events to channels in ${Date.now() - started}ms`);
+        const built = { at: Date.now(), sources, lastSync: sync.lastSync, ...buildSnapshot(enabledSourceIds) };
+        console.log(`[Events] Matched ${built.events.length} events to channels in ${Date.now() - started}ms${sync.syncing ? ' (sync running, not cached)' : ''}`);
+        if (sync.syncing) return built;
+        snapshot = built;
     }
     return snapshot;
 }
@@ -619,22 +719,29 @@ function getSnapshot(enabledSourceIds) {
 // ===================== Per user =====================
 
 /**
- * Events for one user, best first: their teams, then what's live, then
- * upcoming, each by relevance (their leagues/sports, league weight, reach).
+ * Events for one user. Tiers, in order: their teams' games (next TEAM_DAYS
+ * days), games in their leagues/sports (next LEAGUE_DAYS days), then
+ * everything else on now or in the next 24h. Followed tiers run in date
+ * order, so what's next comes first; the rest leads with what's live and
+ * relevant. With `mine` (Home), a user who picked sports or teams only gets
+ * their tiers. Followed games without channels are kept (`channelRows` empty,
+ * not in the guide yet); other events need a channel.
  * Channel rows are raw playlist rows (routes/live.js shapes them), the
  * Language Priority copies first; the hard filter drops other languages.
  */
-function forUser(profile, { sourceIds, lang = '', hard = false, limit = 30 }) {
+function forUser(profile, { sourceIds, lang = '', hard = false, limit = 30, mine = false }) {
     const { events, channels } = getSnapshot(sourceIds);
     const now = Date.now();
     const myLeagues = leaguesFor(profile);
+    teamLeagues(profile?.teams).forEach(id => myLeagues.add(id));
     const mySports = new Set(profile?.sports || []);
     const teamKeys = new Set(profile?.teams || []);
+    const focused = mySports.size > 0 || teamKeys.size > 0;
     const myTeams = [...teamsByKey(profile?.teams).values()];
     const teamVariants = myTeams.map(t => variants({ name: t.name, short: t.short }));
-    const isTeam = s => s?.id && teamKeys.has(teamKey(leagueById.get(s.league) || {}, s.id));
+    const isTeam = (s, league) => s?.id && teamKeys.has(teamKey(leagueById.get(league) || {}, s.id));
 
-    const scored = [];
+    const picked = [];
     for (const e of events) {
         const seen = new Set();
         let rows = e.epgIds.flatMap(id => channels.get(id) || []).filter(r => {
@@ -642,7 +749,6 @@ function forUser(profile, { sourceIds, lang = '', hard = false, limit = 30 }) {
             return !seen.has(key) && seen.add(key);
         });
         if (hard) rows = rows.filter(r => languages.visible(r.name, r.group_name, lang));
-        if (!rows.length) continue;
         if (lang) {
             rows = [...rows.filter(r => languages.matches(r.name, r.group_name, lang)),
                 ...rows.filter(r => !languages.matches(r.name, r.group_name, lang))];
@@ -650,33 +756,39 @@ function forUser(profile, { sourceIds, lang = '', hard = false, limit = 30 }) {
 
         const favourite = e.guideOnly
             ? teamVariants.some(v => spans(norm(e.title), v).length > 0)
-            : [e.home, e.away].some(s => s && isTeam({ ...s, league: e.league }));
-        let score;
-        if (e.guideOnly) {
-            // Only fixtures several channels carry are worth a slot, unless it's their team
-            if (!favourite && e.epgIds.length < 2) continue;
-            score = 2 + Math.min(e.epgIds.length, 8);
-        } else {
-            const league = leagueById.get(e.league);
-            if (!favourite && !myLeagues.has(e.league) && !league.top) continue;
-            score = league.weight + Math.min(e.epgIds.length, 8) / 2
-                + (myLeagues.has(e.league) ? 20 : mySports.has(e.sport) ? 8 : 0);
-        }
-        const live = e.state === 'in' || (e.start <= now && now < e.end);
-        scored.push({ e, rows, favourite, live, score });
+            : [e.home, e.away].some(s => isTeam(s, e.league));
+        // The leagues the picks resolve to (sport, level, region), not the whole sport:
+        // "Professional" football must not pull in college games
+        const followed = !e.guideOnly && myLeagues.has(e.league);
+        const tier = favourite ? 0 : followed ? 1 : 2;
+        if (mine && focused && tier === 2) continue;
+
+        const ahead = e.start - now;
+        if (ahead > (tier === 0 ? TEAM_DAYS : tier === 1 ? LEAGUE_DAYS : 1) * 24 * HOUR) continue;
+        // Unfollowed events need a channel to be worth a slot; guide-only ones two
+        if (tier === 2 && rows.length < (e.guideOnly ? 2 : 1)) continue;
+        if (tier === 2 && !e.guideOnly && !leagueById.get(e.league).top) continue;
+
+        const live = e.state === 'in' || (!e.timeTbd && e.start <= now && now < e.end);
+        const score = e.guideOnly ? 2 + Math.min(rows.length, 8)
+            : leagueById.get(e.league).weight + Math.min(rows.length, 8) / 2;
+        picked.push({ e, rows, favourite, live, tier, score });
     }
 
-    scored.sort((a, b) =>
-        (b.favourite - a.favourite) || (b.live - a.live) || (b.score - a.score) || (a.e.start - b.e.start));
-    return scored.slice(0, limit).map(({ e, rows, favourite, live }) => ({
+    picked.sort((a, b) => (a.tier - b.tier)
+        || (a.tier < 2 ? a.e.start - b.e.start : (b.live - a.live) || (b.score - a.score) || (a.e.start - b.e.start)));
+    return picked.slice(0, limit).map(({ e, rows, favourite, live, tier }) => ({
         id: e.id,
         title: e.title,
         competition: e.competition,
         sport: e.sport,
         start: new Date(e.start).toISOString(),
         end: new Date(e.end).toISOString(),
+        timeTbd: !!e.timeTbd,
         live,
         favourite,
+        followed: tier < 2,
+        note: e.note || '',
         detail: e.detail,
         home: e.home && { name: e.home.name, short: e.home.short, logo: e.home.logo },
         away: e.away && { name: e.away.name, short: e.away.short, logo: e.away.logo },

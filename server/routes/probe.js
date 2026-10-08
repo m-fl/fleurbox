@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { spawn } = require('child_process');
 const { redact } = require('../services/redact');
+const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
 
 /**
  * Probe endpoint - detects stream codecs and container
@@ -39,7 +40,8 @@ function probeStream(url, ffprobePath, userAgent = null, timeout = 15000) {
             '-show_format',
             '-probesize', '5000000',
             '-analyzeduration', '5000000',
-            url
+            ...FFMPEG_PROTOCOLS,
+            '-i', url
         ];
 
         const proc = spawn(ffprobePath, args);
@@ -156,7 +158,7 @@ function analyzeProbeResult(probeResult, url) {
     };
 }
 
-router.get('/', async (req, res) => {
+router.get('/', requireAllowedUrl, async (req, res) => {
     const { url, ua } = req.query;
     if (!url) {
         return res.status(400).json({ error: 'URL parameter is required' });

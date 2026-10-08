@@ -1420,7 +1420,9 @@ class VideoPlayer {
             this.hls = null;
         }
         this.video.pause();
-        this.video.src = '';
+        // Not src = '': that fires "MEDIA_ELEMENT_ERROR: Empty src attribute"
+        // and leaves video.src pointing at the page URL
+        this.video.removeAttribute('src');
         this.video.load();
 
         // Reset UI to idle state

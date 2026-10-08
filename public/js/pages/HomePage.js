@@ -144,7 +144,8 @@ class HomePage {
 
                 <div id="for-you"></div>
 
-                <section class="dashboard-section" id="filter-zones-section">
+                <!-- Hidden for now (Live Events and For You cover it); may come back -->
+                <section class="dashboard-section hidden" id="filter-zones-section">
                     <div class="section-header">
                         <h2>Filter Zones</h2>
                     </div>
@@ -332,23 +333,35 @@ class HomePage {
     }
 
     /**
-     * Live Events: today's fixtures on the user's channels (their teams first,
-     * then live, then upcoming). A card plays the best channel; Live TV lists
-     * every channel showing it.
+     * Live Events: the user's teams, then their leagues/sports, in date order
+     * (only those, once they've picked sports in the quiz); otherwise the big
+     * events on their channels. A card opens the event's page (EventPage.js),
+     * which lists the channels showing it; a followed game the guide doesn't
+     * list yet opens it too, without channels. Live TV lists them as well.
      */
     async renderLiveEvents() {
         const list = document.getElementById('live-events-list');
         const section = document.getElementById('live-events-section');
         if (!list || !section) return;
 
+        // First load: show the row with a spinner (the server may be re-matching
+        // fixtures to the guide). Background refreshes keep the cards meanwhile.
+        if (!list.querySelector('.event-card')) {
+            section.classList.remove('hidden');
+            list.innerHTML = `
+                <div class="events-loading" role="status">
+                    <span class="events-spinner" aria-hidden="true"></span>
+                    <span>Finding today's games…</span>
+                </div>`;
+        }
+
         let events = [];
         try {
-            events = await window.API.live.events(20);
+            events = await window.API.live.events(20, true);
         } catch (err) {
             console.warn('[Dashboard] Live events unavailable:', err);
         }
         if (!list.isConnected) return;
-        events = events.filter(e => e.channels?.length);
         if (!events.length) {
             section.classList.add('hidden');
             return;
@@ -357,42 +370,61 @@ class HomePage {
         section.classList.remove('hidden');
         list.innerHTML = events.map(e => this.createEventCard(e)).join('');
         list.querySelectorAll('.event-card').forEach((card, i) => {
-            card.addEventListener('click', () => this.playChannel(events[i].channels[0]));
+            const open = () => this.app.pages.event?.open(events[i], 'home');
+            card.addEventListener('click', open);
+            card.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    open();
+                }
+            });
         });
         this.updateScrollArrows();
     }
 
-    /** "20:30", "Tomorrow 20:30" or "Sat 20:30", in local time */
-    static eventTime(iso) {
+    /**
+     * "20:30", "Tomorrow 20:30", "Sat 20:30" or "Sat 12 Oct" in local time;
+     * a game without a set time shows its date and "TBA". ESPN's placeholder
+     * for that is midnight US Eastern, so the date is read in that zone.
+     */
+    static eventTime(iso, timeTbd = false) {
         const date = new Date(iso);
+        const day = timeTbd
+            ? new Date(date.toLocaleDateString('en-US', { timeZone: 'America/New_York' }))
+            : new Date(date);
+        const days = Math.round((new Date(day).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+        const when = days === 0 ? 'Today' : days === 1 ? 'Tomorrow'
+            : days < 7 ? day.toLocaleDateString([], { weekday: 'short' })
+            : day.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+        if (timeTbd) return `${when} · TBA`;
         const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const days = Math.round((new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
-        if (days === 0) return time;
-        if (days === 1) return `Tomorrow ${time}`;
-        return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+        return days === 0 ? time : `${when} ${time}`;
     }
 
     createEventCard(event) {
         const esc = text => String(text ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
         const logo = side => side?.logo
-            ? `<img src="${API.imageUrl(side.logo)}" alt="${esc(side.short || side.name)}" loading="lazy" onerror="this.style.visibility='hidden'">`
+            ? `<img src="${esc(API.imageUrl(side.logo))}" alt="${esc(side.short || side.name)}" loading="lazy" data-fallback="hide">`
             : `<span class="event-initials">${esc((side?.short || side?.name || '?').slice(0, 3))}</span>`;
         const art = event.home && event.away
             ? `<div class="event-sides">${logo(event.home)}<span class="event-vs">vs</span>${logo(event.away)}</div>`
             : `<div class="event-sides event-sides-text">${esc(event.competition || event.title)}</div>`;
         const count = event.channels.length;
-        const meta = [event.competition, `${count} channel${count === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+        const reach = count ? `${count} channel${count === 1 ? '' : 's'}` : 'Not in guide yet';
+        const meta = [event.note || event.competition, reach].filter(Boolean).join(' · ');
 
         return `
-            <div class="dashboard-card event-card ${event.live ? 'is-live' : ''}" title="${esc(event.programme || event.title)}">
+            <div class="dashboard-card event-card ${event.live ? 'is-live' : ''} ${count ? '' : 'no-channels'}"
+                 title="${esc(count ? (event.programme || event.title) : 'Your guide does not list this game yet')}"
+                 role="button" tabindex="0">
                 <div class="event-art">
                     ${art}
                     ${event.live ? '<span class="card-badge event-live">LIVE</span>'
-                        : `<span class="card-badge event-when">${esc(HomePage.eventTime(event.start))}</span>`}
+                        : `<span class="card-badge event-when">${esc(HomePage.eventTime(event.start, event.timeTbd))}</span>`}
                     ${event.favourite ? '<span class="event-fav" title="Your team">&#9733;</span>' : ''}
-                    <div class="play-icon-overlay">
+                    ${count ? `<div class="play-icon-overlay">
                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    </div>
+                    </div>` : ''}
                 </div>
                 <div class="card-info">
                     <div class="card-title">${esc(event.title)}</div>
@@ -495,9 +527,9 @@ class HomePage {
         const posterUrl = API.imageUrl(poster);
 
         return `
-            <div class="dashboard-card" data-id="${item_id}" data-key="${item.key || ''}" data-type="${type}">
+            <div class="dashboard-card" data-id="${this.escapeHtml(item_id)}" data-key="${this.escapeHtml(item.key)}" data-type="${this.escapeHtml(type)}">
                 <div class="card-image">
-                    <img src="${posterUrl}" alt="${data.title || item.name}" loading="lazy" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
+                    <img src="${this.escapeHtml(posterUrl)}" alt="${this.escapeHtml(data.title || item.name)}" loading="lazy" data-fallback="/img/poster-placeholder.jpg">
                     <button class="card-remove" title="Remove from Continue Watching" aria-label="Remove">&times;</button>
                     ${item.upNext ? '<span class="card-badge">Up next</span>' : ''}
                     <div class="progress-bar-container">
@@ -508,8 +540,8 @@ class HomePage {
                     </div>
                 </div>
                 <div class="card-info">
-                    <div class="card-title" title="${item.name || data.title}">${item.name || data.title || 'Unknown Title'}</div>
-                    <div class="card-subtitle">${data.subtitle || (type === 'movie' ? 'Movie' : 'Series')}</div>
+                    <div class="card-title" title="${this.escapeHtml(item.name || data.title)}">${this.escapeHtml(item.name || data.title || 'Unknown Title')}</div>
+                    <div class="card-subtitle">${this.escapeHtml(data.subtitle || (type === 'movie' ? 'Movie' : 'Series'))}</div>
                 </div>
             </div>
         `;
@@ -522,9 +554,9 @@ class HomePage {
         const posterUrl = API.imageUrl(poster);
 
         return `
-            <div class="dashboard-card" data-id="${item_id}" data-type="${type}">
+            <div class="dashboard-card" data-id="${this.escapeHtml(item_id)}" data-type="${this.escapeHtml(type)}">
                 <div class="card-image">
-                    <img src="${posterUrl}" alt="${item.name}" loading="lazy" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
+                    <img src="${this.escapeHtml(posterUrl)}" alt="${this.escapeHtml(item.name)}" loading="lazy" data-fallback="/img/poster-placeholder.jpg">
                     ${rank ? `<span class="card-rank">${rank}</span>` : ''}
                     ${item.overview ? `<div class="card-peek"><p>${this.escapeHtml(item.overview)}</p></div>` : ''}
                     <div class="play-icon-overlay">
@@ -532,8 +564,8 @@ class HomePage {
                     </div>
                 </div>
                 <div class="card-info">
-                    <div class="card-title" title="${item.name || (data && data.title)}">${item.name || (data && data.title) || 'Unknown Title'}</div>
-                    <div class="card-subtitle">${(data && data.subtitle) || (type === 'movie' ? 'Movie' : (type === 'live' ? 'Live TV' : 'Series'))}</div>
+                    <div class="card-title" title="${this.escapeHtml(item.name || (data && data.title))}">${this.escapeHtml(item.name || (data && data.title) || 'Unknown Title')}</div>
+                    <div class="card-subtitle">${this.escapeHtml((data && data.subtitle) || (type === 'movie' ? 'Movie' : (type === 'live' ? 'Live TV' : 'Series')))}</div>
                 </div>
             </div>
         `;
@@ -764,9 +796,7 @@ class HomePage {
     }
 
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text ?? '';
-        return div.innerHTML;
+        return escapeHtml(text);
     }
 
     /**

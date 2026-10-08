@@ -117,6 +117,48 @@ const ContentDetails = {
             });
     },
 
+    /**
+     * Every copy of a title (same TMDB id, other categories), Language Priority
+     * first. Resolves to [] when there are none or the lookup fails.
+     */
+    variants(type, sourceId, itemId) {
+        return API.request('GET', `/details/variants?type=${type}` +
+            `&sourceId=${encodeURIComponent(sourceId)}&itemId=${encodeURIComponent(itemId)}`)
+            .catch(err => {
+                console.warn('[ContentDetails] Variants failed:', err);
+                return [];
+            });
+    },
+
+    /**
+     * Source picker for a title filed in several categories: fills `el` with a
+     * select of the copies (hidden when there is only one) and calls
+     * onPick(variant) when another is chosen.
+     */
+    renderSources(el, variants, sourceId, itemId, onPick) {
+        if (!el) return;
+        const current = variants.findIndex(v =>
+            String(v.sourceId) === String(sourceId) && String(v.itemId) === String(itemId));
+        if (variants.length < 2 || current < 0) {
+            el.innerHTML = '';
+            el.classList.add('hidden');
+            return;
+        }
+
+        el.classList.remove('hidden');
+        el.innerHTML = `
+            <label class="details-sources-label" for="${el.id}-select">Source</label>
+            <select class="source-select details-sources-select" id="${el.id}-select">
+                ${variants.map((v, i) => `<option value="${i}" ${i === current ? 'selected' : ''}>${
+                    this.escape([v.category, v.name].filter(Boolean).join(' · '))}</option>`).join('')}
+            </select>
+            <span class="details-sources-count">${variants.length} copies</span>`;
+        el.querySelector('select').addEventListener('change', (e) => {
+            const picked = variants[e.target.value];
+            if (picked) onPick(picked);
+        });
+    },
+
     // `${type}:${sourceId}` -> Promise<Map<categoryId, categoryName>>
     categoryCache: {},
 
@@ -148,9 +190,7 @@ const ContentDetails = {
     },
 
     escape(text) {
-        const div = document.createElement('div');
-        div.textContent = text ?? '';
-        return div.innerHTML;
+        return escapeHtml(text);
     },
 
     /**

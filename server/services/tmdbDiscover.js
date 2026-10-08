@@ -8,7 +8,7 @@
  * spaced REQUEST_GAP_MS apart (TMDB asks for politeness).
  *
  * Keywords (motifs such as "heist") are looked up by name once and stored in
- * `tmdb_keywords`; TMDB keyword ids are stable, so they are kept 30 days.
+ * `tmdb_keywords`; TMDB keyword ids are stable, so they are kept 90 days.
  */
 
 const { getDb } = require('../db/sqlite');

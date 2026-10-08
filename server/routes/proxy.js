@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requireAdmin } = require('../auth');
 const { sources } = require('../db');
 const { getDb } = require('../db/sqlite'); // Import SQLite
 const xtreamApi = require('../services/xtreamApi');
@@ -14,6 +15,30 @@ const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { Readable } = require('stream');
 const imageCache = require('../services/imageCache');
+const { guardedFetch, requireAllowedUrl } = require('../services/urlGuard');
+
+/**
+ * The proxies pass on whatever a remote server sends, and serve it from this
+ * site's own origin - so a link to /api/proxy/...?url=<a page with a script>
+ * would run that script as Fleurbox, with access to the login token. Every
+ * proxied response is therefore served sandboxed (no scripts, no same-origin
+ * access even if a browser opens it as a page), and only media types pass
+ * through as they are.
+ */
+const PROXY_CSP = "default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; sandbox";
+function lockDown(req, res, next) {
+    res.set('Content-Security-Policy', PROXY_CSP);
+    res.set('X-Content-Type-Options', 'nosniff');
+    next();
+}
+
+// Types a stream, playlist, segment, key or subtitle legitimately comes as
+const STREAM_TYPE = /^(video\/|audio\/|application\/(vnd\.apple\.mpegurl|x-mpegurl|mpegurl|octet-stream|mp4|mp2t|dash\+xml)\b|binary\/octet-stream|text\/vtt\b)/i;
+
+/** Upstream content type, or octet-stream when it is anything else (text/html, svg...) */
+function streamType(type) {
+    return type && STREAM_TYPE.test(type) ? type : 'application/octet-stream';
+}
 
 // Default cache max age in hours
 const DEFAULT_MAX_AGE_HOURS = 24;
@@ -475,7 +500,7 @@ router.get('/epg/:sourceId', async (req, res) => {
 });
 
 // Clear cache (kept for compatibility)
-router.delete('/cache/:sourceId', (req, res) => {
+router.delete('/cache/:sourceId', requireAdmin, (req, res) => {
     const sourceId = req.params.sourceId;
     cache.clearSource(sourceId);
     res.json({ success: true });
@@ -642,7 +667,7 @@ router.get('/epg/:sourceId', async (req, res) => {
  * Clear cache for a source
  * DELETE /api/proxy/cache/:sourceId
  */
-router.delete('/cache/:sourceId', (req, res) => {
+router.delete('/cache/:sourceId', requireAdmin, (req, res) => {
     const sourceId = req.params.sourceId;
     cache.clearSource(sourceId);
     res.json({ success: true });
@@ -652,7 +677,7 @@ router.delete('/cache/:sourceId', (req, res) => {
  * Clear EPG cache for a source (legacy endpoint, calls clearSource)
  * DELETE /api/proxy/epg/:sourceId/cache
  */
-router.delete('/epg/:sourceId/cache', (req, res) => {
+router.delete('/epg/:sourceId/cache', requireAdmin, (req, res) => {
     const sourceId = req.params.sourceId;
     cache.clear('epg', sourceId, 'data');
     res.json({ success: true });
@@ -694,7 +719,7 @@ router.post('/epg/:sourceId/channels', async (req, res) => {
  * This handles CORS for streams that don't allow cross-origin
  * Supports HTTP Range requests for video seeking
  */
-router.get('/stream', async (req, res) => {
+router.get('/stream', lockDown, requireAllowedUrl, async (req, res) => {
     const maxRetries = 2;
     let lastError = null;
 
@@ -725,7 +750,7 @@ router.get('/stream', async (req, res) => {
                 headers['Range'] = rangeHeader;
             }
 
-            const response = await fetch(url, { headers });
+            const response = await guardedFetch(url, { headers });
 
             // Retry on 5xx errors (transient upstream issues)
             if (response.status >= 500 && attempt < maxRetries) {
@@ -740,7 +765,7 @@ router.get('/stream', async (req, res) => {
                     const errorBody = await response.text().catch(() => 'N/A');
                     console.error(`403 Response body: ${errorBody.substring(0, 200)}`);
                 }
-                return res.status(response.status).send(`Failed to fetch stream: ${response.statusText}`);
+                return res.status(response.status).type('text/plain').send(`Failed to fetch stream: ${response.statusText}`);
             }
 
             const contentType = response.headers.get('content-type') || '';
@@ -773,7 +798,7 @@ router.get('/stream', async (req, res) => {
             const first = await iterator.next();
 
             if (first.done) {
-                res.set('Content-Type', contentType || 'application/octet-stream');
+                res.set('Content-Type', streamType(contentType));
                 return res.end();
             }
 
@@ -839,7 +864,7 @@ router.get('/stream', async (req, res) => {
 
             // Binary content (Video Segment or Key): Collect and send
             console.log(`[Proxy] Serving binary content (${contentType})`);
-            res.set('Content-Type', contentType || 'application/octet-stream');
+            res.set('Content-Type', streamType(contentType));
 
             // For small files (like encryption keys), collect all data and send at once
             // This ensures proper Content-Length and response completion
@@ -857,6 +882,10 @@ router.get('/stream', async (req, res) => {
             return; // Success - exit the retry loop
 
         } catch (err) {
+            // A redirect to a private address: refused, not retried
+            if (err.status === 403 || err.status === 400) {
+                return res.status(err.status).json({ error: err.message });
+            }
             lastError = err;
             console.error(`Stream proxy error (attempt ${attempt}/${maxRetries}):`, err.message);
             if (attempt < maxRetries) {
@@ -880,14 +909,18 @@ router.get('/stream', async (req, res) => {
  * mixed content (plain-http images on an HTTPS page).
  * GET /api/proxy/image?url=...
  */
-router.get('/image', async (req, res) => {
+router.get('/image', lockDown, async (req, res) => {
     const { url } = req.query;
     if (!url || !/^https?:\/\//i.test(url)) {
         return res.status(400).json({ error: 'http(s) URL required' });
     }
     try {
         const image = await imageCache.get(url);
-        res.set('Content-Type', image.type || 'image/png');
+        // Only images: a page or a script at the URL is refused, not served from here
+        if (!/^image\//i.test(image.type || '')) {
+            return res.status(415).type('text/plain').send('Not an image');
+        }
+        res.set('Content-Type', image.type);
         res.set('Access-Control-Allow-Origin', '*');
         res.set('Cache-Control', `public, max-age=${imageCache.maxAge(url)}${imageCache.isTmdb(url) ? ', immutable' : ''}`);
         if (image.file) {
@@ -898,9 +931,9 @@ router.get('/image', async (req, res) => {
             res.end(image.body);
         }
     } catch (err) {
-        if (err.status) return res.status(err.status).send('Failed to fetch image');
+        if (err.status) return res.status(err.status).type('text/plain').send('Failed to fetch image');
         console.error('Image proxy error:', err.message);
-        res.status(502).send('Image proxy error');
+        res.status(502).type('text/plain').send('Image proxy error');
     }
 });
 

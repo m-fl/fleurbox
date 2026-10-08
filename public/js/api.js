@@ -2,6 +2,35 @@
  * API Client - Frontend API wrapper for Fleurbox
  */
 
+/**
+ * Text -> safe to put in HTML, inside elements and inside quoted attributes.
+ * Everything from a provider, EPG or TMDB (names, titles, descriptions, URLs)
+ * goes through this before it lands in an innerHTML template.
+ */
+function escapeHtml(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+window.escapeHtml = escapeHtml;
+
+/**
+ * <img data-fallback="..."> when the image fails to load: "/img/x.png" swaps
+ * in that image (once), "hide" hides it, "remove" removes it. Replaces inline
+ * onerror="" handlers, which the Content-Security-Policy does not allow.
+ */
+document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.dataset.fallback) return;
+    const fallback = img.dataset.fallback;
+    if (fallback === 'remove') img.remove();
+    else if (fallback === 'hide') img.style.visibility = 'hidden';
+    else if (img.getAttribute('src') !== fallback) img.src = fallback;
+}, true);
+
 const API = {
     /**
      * True when this HTTPS page would have to load a plain-http URL, which
@@ -18,9 +47,11 @@ const API = {
      * device. Also avoids mixed content on HTTPS pages.
      */
     imageUrl(url) {
-        return typeof url === 'string' && /^https?:\/\//i.test(url)
-            ? `/api/proxy/image?url=${encodeURIComponent(url)}`
-            : url;
+        if (typeof url !== 'string') return '';
+        if (/^https?:\/\//i.test(url)) return `/api/proxy/image?url=${encodeURIComponent(url)}`;
+        // Our own files ("/img/placeholder.png") and inline images; anything
+        // else from a feed (javascript:, quotes that would end the attribute) is dropped
+        return /^\/(?!\/)[^"'<>\s\\]*$/.test(url) || /^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(url) ? url : '';
     },
 
     /**
@@ -33,12 +64,6 @@ const API = {
                 'Content-Type': 'application/json'
             }
         };
-
-        // Add authentication token if available
-        const token = localStorage.getItem('authToken');
-        if (token) {
-            options.headers['Authorization'] = `Bearer ${token}`;
-        }
 
         if (data) {
             options.body = JSON.stringify(data);
@@ -58,7 +83,6 @@ const API = {
         if (!response.ok) {
             // If unauthorized, redirect to login
             if (response.status === 401) {
-                localStorage.removeItem('authToken');
                 window.location.href = '/login.html';
                 return;
             }
@@ -112,8 +136,8 @@ const API = {
             API.request('GET', `/live/channel?${new URLSearchParams({ sourceId, itemId })}`),
         // [{ tvgId, name }] -> [{ current, upcoming } | null]
         now: (channels, full = false) => API.request('POST', '/live/now', { channels, full }),
-        // Today's sports/live events on the user's channels, best first
-        events: (limit = 30) => API.request('GET', `/live/events?limit=${limit}`)
+        // Sports/live events, best first; mine = only what the user follows (Home)
+        events: (limit = 30, mine = false) => API.request('GET', `/live/events?limit=${limit}${mine ? '&mine=1' : ''}`)
     },
 
     // Favorites

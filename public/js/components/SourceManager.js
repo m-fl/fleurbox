@@ -118,7 +118,7 @@ class SourceManager {
       <div class="source-item ${source.enabled ? '' : 'disabled'}" data-id="${source.id}">
         <span class="source-icon">${icons[type]}</span>
         <div class="source-info">
-          <div class="source-name">${source.name}</div>
+          <div class="source-name">${this.escapeHtml(source.name)}</div>
           <div class="source-url">${source.url}</div>
         </div>
         <div class="source-actions">
@@ -209,7 +209,7 @@ class SourceManager {
         const nameField = `
       <div class="form-group">
         <label for="source-name">Name</label>
-        <input type="text" id="source-name" class="form-input" placeholder="My Source" value="${source.name || ''}">
+        <input type="text" id="source-name" class="form-input" placeholder="My Source" value="${this.escapeHtml(source.name)}">
       </div>
     `;
 
@@ -568,7 +568,7 @@ class SourceManager {
             select.innerHTML = '<option value="">Select a source...</option>';
 
             sources.filter(s => s.type === 'xtream' || s.type === 'm3u').forEach(source => {
-                select.innerHTML += `<option value="${source.id}">${source.name} (${source.type})</option>`;
+                select.innerHTML += `<option value="${this.escapeHtml(source.id)}">${this.escapeHtml(source.name)} (${this.escapeHtml(source.type)})</option>`;
             });
         } catch (err) {
             console.error('Error loading content sources:', err);
@@ -729,8 +729,8 @@ class SourceManager {
                 return `
                     <label class="checkbox-label channel-item" title="${this.escapeHtml(item.name)}">
                         <input type="checkbox" class="channel-checkbox" 
-                               data-type="${item.type}" 
-                               data-id="${item.id}" 
+                               data-type="${this.escapeHtml(item.type)}" 
+                               data-id="${this.escapeHtml(item.id)}" 
                                data-source-id="${this.treeData.sourceId}" 
                                ${!itemHidden ? 'checked' : ''}>
                         <span class="channel-name">${this.escapeHtml(item.name)}</span>
@@ -743,7 +743,7 @@ class SourceManager {
             <div class="content-group ${isExpanded ? '' : 'collapsed'}" data-group-id="${this.escapeHtml(group.id)}">
                 <div class="content-group-header">
                     <span class="group-expander">${Icons.chevronDown}</span>
-                    <label class="checkbox-label" onclick="event.stopPropagation()">
+                    <label class="checkbox-label">
                         <input type="checkbox" class="group-checkbox" 
                                data-type="group" 
                                data-id="${this.escapeHtml(group.name)}" 
@@ -758,16 +758,15 @@ class SourceManager {
     }
 
     escapeHtml(text) {
-        if (!text) return '';
-        return String(text)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
+        return escapeHtml(text);
     }
 
     attachTreeListeners(container) {
+        // Clicking a group's checkbox doesn't also toggle the group open/closed
+        container.querySelectorAll('.content-group-header > .checkbox-label').forEach(label => {
+            label.addEventListener('click', (e) => e.stopPropagation());
+        });
+
         // Toggle group collapse
         container.querySelectorAll('.content-group-header').forEach(header => {
             header.addEventListener('click', (e) => {

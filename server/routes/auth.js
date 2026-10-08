@@ -10,7 +10,8 @@ auth.configureLocalStrategy(
 );
 
 auth.configureJwtStrategy(
-    async (id) => await db.users.getById(id)
+    async (id) => await db.users.getById(id),
+    async (jti) => await db.revokedTokens.has(jti)
 );
 
 // Configure Passport session serialization (required for OIDC)
@@ -42,10 +43,57 @@ router.get('/oidc/callback',
         const token = auth.generateToken(req.user);
         auth.setAuthCookie(req, res, token);
 
-        // Redirect to hompage with token
-        res.redirect(`/?token=${token}`);
+        // The cookie carries the login; never put the token in a URL (history, logs)
+        res.redirect('/');
     }
 );
+
+/**
+ * Login rate limit: after LOGIN_MAX_FAILURES failed attempts within
+ * LOGIN_WINDOW_MS - per client IP, and separately per username (so spreading
+ * guesses over many IPs doesn't help) - further attempts get 429 until the
+ * window has passed. A successful login clears that IP's and username's count.
+ */
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const loginFailures = new Map(); // 'ip:<ip>' | 'user:<name>' -> [timestamps]
+
+function recentFailures(key) {
+    const cutoff = Date.now() - LOGIN_WINDOW_MS;
+    const times = (loginFailures.get(key) || []).filter(t => t > cutoff);
+    if (times.length) loginFailures.set(key, times); else loginFailures.delete(key);
+    return times;
+}
+
+function loginKeys(req) {
+    const name = String(req.body?.username || '').trim().toLowerCase();
+    return [`ip:${req.ip}`, ...(name ? [`user:${name}`] : [])];
+}
+
+function loginLimit(req, res, next) {
+    for (const key of loginKeys(req)) {
+        const times = recentFailures(key);
+        if (times.length >= LOGIN_MAX_FAILURES) {
+            const retryAfter = Math.ceil((times[0] + LOGIN_WINDOW_MS - Date.now()) / 1000);
+            res.set('Retry-After', String(retryAfter));
+            return res.status(429).json({ error: `Too many failed attempts. Try again in ${Math.ceil(retryAfter / 60)} min.` });
+        }
+    }
+    next();
+}
+
+function recordLoginFailure(req) {
+    for (const key of loginKeys(req)) {
+        loginFailures.set(key, [...recentFailures(key), Date.now()]);
+    }
+}
+
+function clearLoginFailures(req) {
+    loginKeys(req).forEach(key => loginFailures.delete(key));
+}
+
+// Forget idle entries so the map can't grow without bound
+setInterval(() => [...loginFailures.keys()].forEach(recentFailures), LOGIN_WINDOW_MS).unref();
 
 /**
  * Check if initial setup is required
@@ -65,12 +113,13 @@ router.get('/setup-required', async (req, res) => {
  * Initial setup - Create admin user
  * POST /api/auth/setup
  */
-router.post('/setup', async (req, res) => {
+router.post('/setup', loginLimit, async (req, res) => {
     try {
         const userCount = await db.users.count();
 
         // Check if setup already done
         if (userCount > 0) {
+            recordLoginFailure(req);
             return res.status(400).json({ error: 'Setup already completed' });
         }
 
@@ -80,8 +129,8 @@ router.post('/setup', async (req, res) => {
             return res.status(400).json({ error: 'Username and password required' });
         }
 
-        if (password.length < 6) {
-            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        if (password.length < auth.MIN_PASSWORD_LENGTH) {
+            return res.status(400).json({ error: `Password must be at least ${auth.MIN_PASSWORD_LENGTH} characters` });
         }
 
         // Create admin user
@@ -98,7 +147,6 @@ router.post('/setup', async (req, res) => {
 
         res.status(201).json({
             message: 'Admin user created successfully',
-            token,
             user: adminUser
         });
     } catch (err) {
@@ -111,7 +159,7 @@ router.post('/setup', async (req, res) => {
  * Login with Passport Local Strategy
  * POST /api/auth/login
  */
-router.post('/login', (req, res, next) => {
+router.post('/login', loginLimit, (req, res, next) => {
     auth.passport.authenticate('local', { session: false }, (err, user, info) => {
         if (err) {
             console.error('Login error:', err);
@@ -119,15 +167,16 @@ router.post('/login', (req, res, next) => {
         }
 
         if (!user) {
+            recordLoginFailure(req);
             return res.status(401).json({ error: info?.message || 'Invalid credentials' });
         }
+        clearLoginFailures(req);
 
         // Generate JWT token
         const token = auth.generateToken(user);
         auth.setAuthCookie(req, res, token);
 
         res.json({
-            token,
             user: {
                 id: user.id,
                 username: user.username,
@@ -138,12 +187,18 @@ router.post('/login', (req, res, next) => {
 });
 
 /**
- * Logout (client-side handles token removal)
+ * Logout: the token stops working here and now (not just in this browser)
  * POST /api/auth/logout
  */
-router.post('/logout', (req, res) => {
-    // With JWT, logout is handled client-side by removing the token
-    // This endpoint exists for consistency and future server-side token blacklisting
+router.post('/logout', async (req, res) => {
+    const payload = auth.verifyToken(auth.tokenFromRequest(req));
+    if (payload?.jti) {
+        try {
+            await db.revokedTokens.add(payload.jti, payload.exp);
+        } catch (err) {
+            console.error('Error revoking token:', err);
+        }
+    }
     auth.clearAuthCookie(res);
     res.json({ success: true, message: 'Logged out successfully' });
 });
@@ -209,8 +264,8 @@ router.post('/users', auth.requireAuth, auth.requireAdmin, async (req, res) => {
             return res.status(400).json({ error: 'Username, password, and role are required' });
         }
 
-        if (password.length < 6) {
-            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        if (password.length < auth.MIN_PASSWORD_LENGTH) {
+            return res.status(400).json({ error: `Password must be at least ${auth.MIN_PASSWORD_LENGTH} characters` });
         }
 
         if (!['admin', 'viewer'].includes(role)) {
@@ -247,10 +302,16 @@ router.put('/users/:id', auth.requireAuth, auth.requireAdmin, async (req, res) =
         }
 
         if (password) {
-            if (password.length < 6) {
-                return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            if (password.length < auth.MIN_PASSWORD_LENGTH) {
+                return res.status(400).json({ error: `Password must be at least ${auth.MIN_PASSWORD_LENGTH} characters` });
             }
             updates.passwordHash = await auth.hashPassword(password);
+        }
+
+        // A new password or role ends the user's existing logins
+        if (password || role) {
+            const current = await db.users.getById(id);
+            updates.tokenVersion = (current?.tokenVersion || 0) + 1;
         }
 
         if (role) {

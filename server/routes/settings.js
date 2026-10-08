@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requireAdmin } = require('../auth');
 const { settings, getDefaultSettings } = require('../db');
 const syncService = require('../services/syncService');
 
@@ -21,9 +22,26 @@ router.get('/', async (req, res) => {
  * Update settings (partial update)
  * PUT /api/settings
  */
+// What a non-admin may change: their player's volume and autoplay. Everything
+// else (transcoding, sync, language filter...) is global and admin-only.
+const VIEWER_KEYS = new Set(['lastVolume', 'autoPlayNextEpisode']);
+
+/**
+ * The known, plain (string/number/boolean) settings from a request body that
+ * this user may change; anything else is ignored
+ */
+function allowedUpdates(body, user) {
+    const known = getDefaultSettings();
+    const isAdmin = user?.role === 'admin';
+    return Object.fromEntries(Object.entries(body && typeof body === 'object' ? body : {})
+        .filter(([key, value]) => Object.prototype.hasOwnProperty.call(known, key)
+            && ['string', 'number', 'boolean'].includes(typeof value)
+            && (isAdmin || VIEWER_KEYS.has(key))));
+}
+
 router.put('/', async (req, res) => {
     try {
-        const updates = req.body;
+        const updates = allowedUpdates(req.body, req.user);
         const updatedSettings = await settings.update(updates);
 
         // If sync interval changed, restart the server-side sync timer
@@ -42,7 +60,7 @@ router.put('/', async (req, res) => {
  * Reset settings to defaults
  * DELETE /api/settings
  */
-router.delete('/', async (req, res) => {
+router.delete('/', requireAdmin, async (req, res) => {
     try {
         const defaultSettings = await settings.reset();
         res.json(defaultSettings);
@@ -96,7 +114,7 @@ router.get('/hw-info', async (req, res) => {
  * Refresh hardware detection (re-probe GPUs)
  * POST /api/settings/hw-info/refresh
  */
-router.post('/hw-info/refresh', async (req, res) => {
+router.post('/hw-info/refresh', requireAdmin, async (req, res) => {
     try {
         const hwDetect = require('../services/hwDetect');
         const capabilities = await hwDetect.refresh();

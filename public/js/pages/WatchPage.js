@@ -107,6 +107,14 @@ class WatchPage {
         // Watch history
         this.historyInterval = null;
 
+        // Playback recovery: every loadVideo()/stop() bumps loadSeq, so a load
+        // that is still awaiting (probe, session start) when a newer one starts
+        // gives up instead of attaching its stream on top
+        this.loadSeq = 0;
+        this.retryCount = 0;
+        this.retryTimer = null;
+        this.retryResetTimer = null;
+
         this.init();
     }
 
@@ -202,6 +210,11 @@ class WatchPage {
         this.video?.addEventListener('pause', () => this.onPause());
         this.video?.addEventListener('ended', () => this.onEnded());
         this.video?.addEventListener('error', (e) => this.onError(e));
+        // Playing steadily for a while: a later failure gets fresh retries
+        this.video?.addEventListener('playing', () => {
+            clearTimeout(this.retryResetTimer);
+            this.retryResetTimer = setTimeout(() => { this.retryCount = 0; }, 15000);
+        });
         this.video?.addEventListener('waiting', () => this.showLoading());
         this.video?.addEventListener('canplay', () => this.hideLoading());
 
@@ -462,6 +475,7 @@ class WatchPage {
      * Start a HLS transcode session
      */
     async startTranscodeSession(url, options = {}) {
+        const seq = this.loadSeq;
         try {
             console.log('[WatchPage] Starting HLS transcode session...', options);
             const res = await fetch('/api/transcode/session', {
@@ -475,6 +489,11 @@ class WatchPage {
             });
             if (!res.ok) throw new Error('Failed to start session');
             const session = await res.json();
+            if (seq !== this.loadSeq) {
+                // A newer load or stop() came in meanwhile: nobody will play this
+                fetch(`/api/transcode/${session.sessionId}`, { method: 'DELETE' }).catch(() => {});
+                return null;
+            }
             this.currentSessionId = session.sessionId;
             return session.playlistUrl;
         } catch (err) {
@@ -548,7 +567,9 @@ class WatchPage {
         this.currentUrl = url;
 
         // Stop any existing playback
-        this.stop();
+        this.stop({ keepRetries: true });
+        const seq = this.loadSeq;
+        const superseded = () => seq !== this.loadSeq;
 
         // Show loading spinner
         this.showLoading();
@@ -558,6 +579,7 @@ class WatchPage {
             await Promise.race([this.sessionStopPromise, new Promise(r => setTimeout(r, 5000))]);
             this.sessionStopPromise = null;
         }
+        if (superseded()) return;
 
         // Get settings for proxy/transcode
         let settings = {};
@@ -566,6 +588,7 @@ class WatchPage {
         } catch (e) {
             console.warn('Could not load settings');
         }
+        if (superseded()) return;
 
         // Detect stream type
         const looksLikeHls = url.includes('.m3u8') || url.includes('m3u8');
@@ -579,6 +602,7 @@ class WatchPage {
                 const ua = settings.userAgentPreset === 'custom' ? settings.userAgentCustom : settings.userAgentPreset;
                 const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(url)}&ua=${encodeURIComponent(ua || '')}`);
                 const info = await probeRes.json();
+                if (superseded()) return;
                 console.log(`[WatchPage] Probe result: video=${info.video}, audio=${info.audio}, ${info.width}x${info.height}, compatible=${info.compatible}`);
 
                 // Store early probe info for quality display
@@ -608,6 +632,7 @@ class WatchPage {
                         audioChannels: info.audioChannels,
                         audioTrack: this.selectedAudioTrack
                     });
+                    if (superseded()) return;
                     this.playHls(playlistUrl);
                     this.setVolumeFromStorage();
                     return;
@@ -640,6 +665,7 @@ class WatchPage {
                         seekOffset: this.resumeTime,
                         audioTrack: this.selectedAudioTrack
                     });
+                    if (superseded()) return;
                     this.playHls(playlistUrl);
                     this.setVolumeFromStorage();
                     return;
@@ -662,6 +688,7 @@ class WatchPage {
                 videoMode: 'encode',
                 seekOffset: this.resumeTime
             });
+            if (superseded()) return;
             this.playHls(playlistUrl);
             this.setVolumeFromStorage();
             return;
@@ -679,12 +706,14 @@ class WatchPage {
                 const info = await probeRes.json();
                 videoCodec = info.video;
             } catch (e) { console.warn('Probe failed for force audio, assuming h264'); }
+            if (superseded()) return;
 
             const playlistUrl = await this.startTranscodeSession(url, {
                 videoMode: 'copy',
                 videoCodec,
                 seekOffset: this.resumeTime
             });
+            if (superseded()) return;
             this.playHls(playlistUrl);
             this.setVolumeFromStorage();
             return;
@@ -785,6 +814,8 @@ class WatchPage {
                     this.playHls(`/api/proxy/stream?url=${encodeURIComponent(this.currentUrl)}`);
                 } else {
                     this.hls.destroy();
+                    this.hls = null;
+                    this.scheduleRetry(`HLS ${data.details}`);
                 }
             }
         });
@@ -796,7 +827,12 @@ class WatchPage {
         if (this.volumeSlider) this.volumeSlider.value = savedVolume;
     }
 
-    stop() {
+    stop({ keepRetries = false } = {}) {
+        this.loadSeq++;
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        if (!keepRetries) this.retryCount = 0;
+
         // Stop history tracking and save final progress
         this.stopHistoryTracking();
         this.saveProgress();
@@ -817,7 +853,9 @@ class WatchPage {
         }
         if (this.video) {
             this.video.pause();
-            this.video.src = '';
+            // Not src = '': that fires "MEDIA_ELEMENT_ERROR: Empty src attribute"
+            // and leaves video.src pointing at the page URL
+            this.video.removeAttribute('src');
             this.video.load();
         }
 
@@ -1034,9 +1072,50 @@ class WatchPage {
     onError(e) {
         // Only log actual fatal errors, not benign stream recovery events
         const error = this.video?.error;
-        if (error && error.code) {
-            console.error('[WatchPage] Video error:', error.code, error.message);
+        if (!error || !error.code) return;
+        console.error('[WatchPage] Video error:', error.code, error.message);
+        // Aborted = our own teardown; while hls.js drives the element it
+        // recovers (or reports fatal) itself
+        if (error.code === MediaError.MEDIA_ERR_ABORTED || this.hls) return;
+        this.scheduleRetry(`video error ${error.code}`);
+    }
+
+    /**
+     * Reload the current stream after a playback failure, resuming where it
+     * stopped: up to MAX_RETRIES times with growing delays, instead of a dead
+     * player that only a page refresh brings back
+     */
+    scheduleRetry(reason) {
+        const MAX_RETRIES = 3;
+        if (!this.currentUrl || this.retryTimer) return;
+        clearTimeout(this.retryResetTimer);
+        if (this.retryCount >= MAX_RETRIES) {
+            console.error(`[WatchPage] Playback failed after ${MAX_RETRIES} retries (${reason})`);
+            this.hideLoading();
+            return;
         }
+        this.retryCount++;
+        const delay = 1000 * 2 ** (this.retryCount - 1);
+        const seq = this.loadSeq;
+        const resumeAt = this.video?.currentTime || 0;
+        console.warn(`[WatchPage] ${reason} - retry ${this.retryCount}/${MAX_RETRIES} in ${delay}ms`);
+        this.showLoading();
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            if (seq !== this.loadSeq) return; // something else started or stopped
+            if (resumeAt > 0) this.resumeTime = resumeAt;
+            this.reload();
+        }, delay);
+    }
+
+    /**
+     * loadVideo() for the current title again (retry, audio track switch).
+     * loadVideo() stops first, which also ends history tracking: restart it.
+     */
+    async reload() {
+        await this.loadVideo(this.currentUrl);
+        this.showNowPlaying(this.content?.title);
+        this.startHistoryTracking();
     }
 
     updateVolumeUI() {
@@ -1123,7 +1202,7 @@ class WatchPage {
 
         this.audioList.innerHTML = this.audioTracks.map((t, i) => {
             const active = t.id === this.selectedAudioTrack ? ' active' : '';
-            return `<button class="captions-option${active}" data-track="${t.id}">${this.audioTrackLabel(t, i)}</button>`;
+            return `<button class="captions-option${active}" data-track="${escapeHtml(t.id)}">${escapeHtml(this.audioTrackLabel(t, i))}</button>`;
         }).join('');
 
         this.audioList.querySelectorAll('.captions-option').forEach(btn => {
@@ -1151,7 +1230,7 @@ class WatchPage {
 
         // Resume where we left off after the reload
         this.resumeTime = pos;
-        await this.loadVideo(this.currentUrl);
+        await this.reload();
     }
 
     // === Captions ===
@@ -1183,7 +1262,7 @@ class WatchPage {
             if (track.kind === 'subtitles' || track.kind === 'captions') {
                 const label = track.label || track.language || `Track ${i + 1}`;
                 const isActive = track.mode === 'showing';
-                html += `<button class="captions-option ${isActive ? 'active' : ''}" data-index="${i}">${label}</button>`;
+                html += `<button class="captions-option ${isActive ? 'active' : ''}" data-index="${i}">${escapeHtml(label)}</button>`;
             }
         }
 
@@ -1416,11 +1495,11 @@ class WatchPage {
         if (!this.recommendedGrid) return;
 
         this.recommendedGrid.innerHTML = movies.map(movie => `
-            <div class="watch-recommended-card" data-id="${movie.stream_id}" data-source="${sourceId}">
-                <img src="${API.imageUrl(movie.stream_icon || movie.cover) || '/img/placeholder.png'}" 
-                     alt="${movie.name}" 
-                     onerror="this.onerror=null;this.src='/img/placeholder.png'" loading="lazy">
-                <p>${movie.name}</p>
+            <div class="watch-recommended-card" data-id="${escapeHtml(movie.stream_id)}" data-source="${escapeHtml(sourceId)}">
+                <img src="${escapeHtml(API.imageUrl(movie.stream_icon || movie.cover) || '/img/placeholder.png')}" 
+                     alt="${escapeHtml(movie.name)}" 
+                     data-fallback="/img/placeholder.png" loading="lazy">
+                <p>${escapeHtml(movie.name)}</p>
             </div>
         `).join('');
 
@@ -1485,13 +1564,13 @@ class WatchPage {
                     parseInt(ep.episode_num) === parseInt(this.currentEpisode);
                 return `
                                 <div class="watch-episode-item ${isActive ? 'active' : ''}" 
-                                     data-episode-id="${ep.id}" 
+                                     data-episode-id="${escapeHtml(ep.id)}" 
                                      data-season="${seasonNum}"
-                                     data-episode="${ep.episode_num}"
-                                     data-container="${ep.container_extension || 'mp4'}">
-                                    <span class="watch-episode-num">E${ep.episode_num}</span>
-                                    <span class="watch-episode-title">${ep.title || `Episode ${ep.episode_num}`}</span>
-                                    <span class="watch-episode-duration">${ep.duration || ''}</span>
+                                     data-episode="${escapeHtml(ep.episode_num)}"
+                                     data-container="${escapeHtml(ep.container_extension || 'mp4')}">
+                                    <span class="watch-episode-num">E${escapeHtml(ep.episode_num)}</span>
+                                    <span class="watch-episode-title">${escapeHtml(ep.title || `Episode ${ep.episode_num}`)}</span>
+                                    <span class="watch-episode-duration">${escapeHtml(ep.duration)}</span>
                                 </div>
                             `;
             }).join('')}

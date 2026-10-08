@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const passport = require('passport');
@@ -10,8 +11,14 @@ const { Strategy: LocalStrategy } = require('passport-local');
  * Using Passport.js with JWT tokens
  */
 
-// JWT Secret - In production, use environment variable
-const JWT_SECRET = process.env.JWT_SECRET || 'fleurbox-secret-key-change-in-production';
+// JWT Secret: required. A built-in fallback would let anyone who has read
+// this file forge a login, so the server refuses to start without one.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+    console.error('JWT_SECRET is missing or shorter than 32 characters. Set it in .env, e.g.:');
+    console.error('  echo "JWT_SECRET=$(openssl rand -hex 32)" >> .env');
+    process.exit(1);
+}
 const JWT_EXPIRY = '24h';
 
 // The JWT is also carried in an httpOnly cookie so that requests the browser
@@ -19,6 +26,13 @@ const JWT_EXPIRY = '24h';
 // cannot send an Authorization header.
 const AUTH_COOKIE = 'nodecast_token';
 const AUTH_COOKIE_MAX_AGE = 24 * 60 * 60 * 1000; // matches JWT_EXPIRY
+
+// Minimum length for new passwords (setup, user create/update)
+const MIN_PASSWORD_LENGTH = 10;
+
+// Compared against when the username doesn't exist, so a wrong username takes
+// as long as a wrong password and response times don't reveal valid names
+const DUMMY_HASH = bcrypt.hashSync('fleurbox-no-such-user', 10);
 
 /**
  * Hash password using bcrypt
@@ -43,7 +57,11 @@ function generateToken(user) {
         {
             id: user.id,
             username: user.username,
-            role: user.role
+            role: user.role,
+            // jti: this token, so logout can revoke it; tv: bumped on password /
+            // role change, which ends every older token of the user
+            jti: crypto.randomUUID(),
+            tv: user.tokenVersion || 0
         },
         JWT_SECRET,
         { expiresIn: JWT_EXPIRY }
@@ -82,6 +100,12 @@ function setAuthCookie(req, res, token) {
     });
 }
 
+/** The request's JWT (Authorization header or cookie), unverified, or null */
+function tokenFromRequest(req) {
+    const bearer = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+    return bearer ? bearer[1] : tokenFromCookie(req);
+}
+
 function clearAuthCookie(res) {
     res.clearCookie(AUTH_COOKIE, { path: '/api' });
 }
@@ -95,13 +119,10 @@ function configureLocalStrategy(getUserByUsername, verifyUserPassword) {
             try {
                 const user = await getUserByUsername(username);
 
-                if (!user) {
-                    return done(null, false, { message: 'Invalid credentials' });
-                }
+                // Always run bcrypt (see DUMMY_HASH); SSO users have no password
+                const isValid = await verifyUserPassword(password, user?.passwordHash || DUMMY_HASH);
 
-                const isValid = await verifyUserPassword(password, user.passwordHash);
-
-                if (!isValid) {
+                if (!user || !user.passwordHash || !isValid) {
                     return done(null, false, { message: 'Invalid credentials' });
                 }
 
@@ -116,7 +137,7 @@ function configureLocalStrategy(getUserByUsername, verifyUserPassword) {
 /**
  * Configure Passport JWT Strategy for token-based authentication
  */
-function configureJwtStrategy(getUserById) {
+function configureJwtStrategy(getUserById, isRevoked) {
     const options = {
         jwtFromRequest: ExtractJwt.fromExtractors([
             ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -129,7 +150,7 @@ function configureJwtStrategy(getUserById) {
         try {
             const user = await getUserById(payload.id);
 
-            if (!user) {
+            if (!user || (payload.tv || 0) !== (user.tokenVersion || 0) || await isRevoked(payload.jti)) {
                 return done(null, false);
             }
 
@@ -175,12 +196,12 @@ function configureOidcStrategy(findUserByOidcId, findUserByEmail, createUser) {
     const { Strategy: OpenIDConnectStrategy } = require('passport-openidconnect');
 
     passport.use(new OpenIDConnectStrategy({
-        issuer: process.env.OIDC_ISSUER_URL || 'https://mock-issuer.com', // Dummy default for mock
+        issuer: process.env.OIDC_ISSUER_URL,
         authorizationURL: process.env.OIDC_AUTH_URL || `${process.env.OIDC_ISSUER_URL}/protocol/openid-connect/auth`,
         tokenURL: process.env.OIDC_TOKEN_URL || `${process.env.OIDC_ISSUER_URL}/protocol/openid-connect/token`,
         userInfoURL: process.env.OIDC_USERINFO_URL || `${process.env.OIDC_ISSUER_URL}/protocol/openid-connect/userinfo`,
-        clientID: process.env.OIDC_CLIENT_ID || 'mock-client-id',
-        clientSecret: process.env.OIDC_CLIENT_SECRET || 'mock-secret',
+        clientID: process.env.OIDC_CLIENT_ID,
+        clientSecret: process.env.OIDC_CLIENT_SECRET,
         callbackURL: process.env.OIDC_CALLBACK_URL || '/api/auth/oidc/callback',
         scope: ['openid', 'profile', 'email']
     },
@@ -228,8 +249,12 @@ function configureOidcStrategy(findUserByOidcId, findUserByEmail, createUser) {
                 // 2. If not found, try to match by email
                 // Extract email - handle both profile.emails[] (Google) and profile.email (others)
                 const email = profile.emails?.[0]?.value || profile.email || profile._json?.email;
+                // Only an address the identity provider has verified may log in
+                // as an existing account - otherwise anyone who can register
+                // that address at the provider would get the account
+                const emailVerified = profile._json?.email_verified === true || profile._json?.email_verified === 'true';
 
-                if (!user && email) {
+                if (!user && email && emailVerified) {
                     user = await findUserByEmail(email);
 
                     // If found by email but no OIDC ID, link them
@@ -240,7 +265,11 @@ function configureOidcStrategy(findUserByOidcId, findUserByEmail, createUser) {
                     }
                 }
 
-                // 3. If still not found, create new user (JIT Provisioning)
+                // 3. If still not found, create a viewer account - only when
+                // OIDC_AUTO_CREATE_USERS=true; otherwise an admin adds users first
+                if (!user && process.env.OIDC_AUTO_CREATE_USERS !== 'true') {
+                    return done(null, false, { message: 'No Fleurbox account for this login' });
+                }
                 if (!user) {
                     const username = profile.username || profile.displayName || (email ? email.split('@')[0] : `user_${sub.substring(0, 8)}`);
 
@@ -300,5 +329,7 @@ module.exports = {
     requireAdmin,
     setAuthCookie,
     clearAuthCookie,
+    tokenFromRequest,
+    MIN_PASSWORD_LENGTH,
     requireRole
 };

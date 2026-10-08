@@ -28,6 +28,7 @@ class TasteQuiz {
             mood: profile?.mood || 'popular',
             sports: [...(profile?.sports || [])],
             regions: [...(profile?.regions || [])],
+            divisions: [...(profile?.divisions || [])],
             teams: [...(profile?.teams || [])]
         };
         // key -> { key, name, short, logo } for picked teams and loaded results
@@ -38,9 +39,7 @@ class TasteQuiz {
     }
 
     static escape(text) {
-        const div = document.createElement('div');
-        div.textContent = text ?? '';
-        return div.innerHTML;
+        return escapeHtml(text);
     }
 
     show() {
@@ -133,6 +132,7 @@ class TasteQuiz {
                             <button class="quiz-chip" data-kind="sports" data-id="${sp.id}">${TasteQuiz.escape(sp.label)}</button>`).join('')}
                     </div>
                 </div>
+                <div class="quiz-field quiz-divisions"></div>
                 <div class="quiz-field quiz-sports-more">
                     <div class="quiz-field-label">Where do you follow them? <span class="quiz-field-hint">Add as many as you like &middot; none picks the biggest leagues</span></div>
                     <div class="quiz-chips quiz-regions"></div>
@@ -168,11 +168,31 @@ class TasteQuiz {
         this.refresh();
     }
 
-    /** Regions for the picked sports; the region/team fields show once a sport is picked */
+    /**
+     * Follow-ups for the picked sports: levels (college vs professional) for
+     * sports that have them, then regions. Region/team fields show once a
+     * sport is picked.
+     */
     renderSportsMore() {
         const body = this.el.querySelector('.quiz-body');
         const { sports } = this.answers;
         body.querySelectorAll('.quiz-sports-more').forEach(f => f.classList.toggle('hidden', sports.length === 0));
+
+        // Levels of sports no longer picked mean nothing any more
+        const withLevels = sports.filter(id => this.catalog.divisions?.[id]?.length);
+        this.answers.divisions = this.answers.divisions.filter(d => sports.includes(d.split(':')[0]));
+        const levels = body.querySelector('.quiz-divisions');
+        levels.classList.toggle('hidden', withLevels.length === 0);
+        levels.innerHTML = withLevels.map(id => `
+            <div class="quiz-field-label">${TasteQuiz.escape(this.catalog.sports.find(sp => sp.id === id)?.label || id)}:
+                which level? <span class="quiz-field-hint">None picks the biggest league</span></div>
+            <div class="quiz-chips">
+                ${this.catalog.divisions[id].map(d => `
+                    <button class="quiz-chip" data-kind="divisions" data-id="${d.id}">${TasteQuiz.escape(d.label)}</button>`).join('')}
+            </div>`).join('');
+        levels.querySelectorAll('[data-kind]').forEach(btn => {
+            btn.addEventListener('click', () => this.toggle(btn.dataset.kind, btn.dataset.id));
+        });
 
         const relevant = new Set(sports.flatMap(id => this.catalog.sportRegions?.[id] || []));
         // Regions no picked sport has leagues in mean nothing any more
@@ -190,7 +210,7 @@ class TasteQuiz {
     async loadTeams() {
         const results = this.el.querySelector('.quiz-team-results');
         if (!results) return;
-        const { sports, regions } = this.answers;
+        const { sports, regions, divisions } = this.answers;
         const gen = this.teamGen = (this.teamGen || 0) + 1;
         if (!sports.length) {
             this.teamList = [];
@@ -198,7 +218,7 @@ class TasteQuiz {
         }
         results.innerHTML = '<span class="quiz-field-hint">Loading teams...</span>';
         try {
-            const query = new URLSearchParams({ sports: sports.join(','), regions: regions.join(',') });
+            const query = new URLSearchParams({ sports: sports.join(','), regions: regions.join(','), divisions: divisions.join(',') });
             const list = await API.request('GET', `/home/sports/teams?${query}`);
             if (gen !== this.teamGen) return; // picks changed meanwhile
             this.teamList = list;
@@ -217,7 +237,7 @@ class TasteQuiz {
         if (!picked || !results) return;
         const chip = (t, selected) => `
             <button class="quiz-chip quiz-team ${selected ? 'selected' : ''}" data-team="${TasteQuiz.escape(t.key)}" title="${TasteQuiz.escape(t.league || '')}">
-                ${t.logo ? `<img src="${API.imageUrl(t.logo)}" alt="" loading="lazy" onerror="this.remove()">` : ''}
+                ${t.logo ? `<img src="${TasteQuiz.escape(API.imageUrl(t.logo))}" alt="" loading="lazy" data-fallback="remove">` : ''}
                 <span>${TasteQuiz.escape(t.name)}</span>${selected ? '<span class="quiz-team-x">&times;</span>' : ''}
             </button>`;
 
@@ -269,7 +289,7 @@ class TasteQuiz {
         if (at >= 0) list.splice(at, 1);
         else if (list.length < (this.catalog.limits[kind] ?? Infinity)) list.push(id);
         else return this.nudgeCount(); // full: nudge the counter instead of silently ignoring the tap
-        if (kind === 'sports' || kind === 'regions') {
+        if (kind === 'sports' || kind === 'regions' || kind === 'divisions') {
             if (kind === 'sports') this.renderSportsMore();
             this.loadTeams();
         }

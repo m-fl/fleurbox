@@ -632,9 +632,9 @@ class EpgGuide {
             <button class="favorite-btn ${isFavorite ? 'active' : ''}" title="${isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}">
               ${isFavorite ? Icons.favorite : Icons.favoriteOutline}
             </button>
-            <img class="epg-channel-logo" src="${logo}" 
-                 alt="" onerror="this.onerror=null;this.src='/img/placeholder.png'">
-            <span class="epg-channel-name">${name}</span>
+            <img class="epg-channel-logo" src="${escapeHtml(logo)}" 
+                 alt="" data-fallback="/img/placeholder.png">
+            <span class="epg-channel-name">${escapeHtml(name)}</span>
             <div class="resize-handle"></div>
           </div>
           <div class="epg-programs">
@@ -843,11 +843,11 @@ class EpgGuide {
             html += `
         <div class="epg-program ${isCurrent ? 'current' : ''}" 
              style="width: ${width}px;"
-             data-title="${prog.title || ''}"
-             data-description="${prog.description || ''}"
-             data-start="${prog.start}"
-             data-stop="${prog.stop}">
-          <div class="epg-program-title">${prog.title || 'Unknown'}</div>
+             data-title="${escapeHtml(prog.title)}"
+             data-description="${escapeHtml(prog.description)}"
+             data-start="${escapeHtml(prog.start)}"
+             data-stop="${escapeHtml(prog.stop)}">
+          <div class="epg-program-title">${escapeHtml(prog.title || 'Unknown')}</div>
           <div class="epg-program-time">
             ${new Date(prog.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </div>
@@ -936,7 +936,7 @@ class EpgGuide {
         body.innerHTML = `
       <p><strong>Time:</strong> ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${stop.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
       <p><strong>Description:</strong></p>
-      <p>${data.description || 'No description available'}</p>
+      <p>${escapeHtml(data.description || 'No description available')}</p>
     `;
 
         footer.innerHTML = '<button class="btn btn-secondary" id="modal-close">Close</button>';

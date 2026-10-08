@@ -257,7 +257,7 @@ class HomeSidebar {
             return `
                 <button class="rail-channel" data-index="${i}" style="--i:${i}" title="${this.escape(ch.name)}">
                     <span class="rail-logo">
-                        <img src="${this.escape(logo)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='/img/placeholder.png'">
+                        <img src="${this.escape(logo)}" alt="" loading="lazy" data-fallback="/img/placeholder.png">
                         <span class="rail-live-dot"></span>
                     </span>
                     <span class="rail-channel-text">
@@ -584,7 +584,7 @@ class HomeSidebar {
         return `
             <button class="stage-card" data-index="${index}" style="--i:${i}">
                 <span class="stage-poster">
-                    <img src="${this.escape(poster)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
+                    <img src="${this.escape(poster)}" alt="" loading="lazy" data-fallback="/img/poster-placeholder.jpg">
                     <span class="stage-card-type">${type === 'movie' ? 'Movie' : 'Series'}</span>
                 </span>
                 <span class="stage-card-title">${this.highlight(item.name)}</span>
@@ -596,7 +596,7 @@ class HomeSidebar {
         const logo = ch.stream_icon ? API.imageUrl(ch.stream_icon) : '/img/placeholder.png';
         return `
             <button class="stage-live-pill" data-index="${index}" style="--i:${index % STAGE_LIVE_PAGE}">
-                <img src="${this.escape(logo)}" alt="" loading="lazy" onerror="this.onerror=null;this.src='/img/placeholder.png'">
+                <img src="${this.escape(logo)}" alt="" loading="lazy" data-fallback="/img/placeholder.png">
                 <span class="stage-live-text">
                     <span class="stage-live-name">${this.highlight(ch.name)}</span>
                     <span class="stage-live-cat">${this.escape(ch.category_name || '')}</span>
@@ -675,7 +675,7 @@ class HomeSidebar {
         slot.innerHTML = `
             <div class="spotlight ${type === 'live' ? 'is-live' : ''}">
                 <div class="spotlight-backdrop" style="background-image:url('${this.escape(poster)}')"></div>
-                <img class="spotlight-poster" src="${this.escape(poster)}" alt="" onerror="this.onerror=null;this.src='/img/poster-placeholder.jpg'">
+                <img class="spotlight-poster" src="${this.escape(poster)}" alt="" data-fallback="/img/poster-placeholder.jpg">
                 <div class="spotlight-info">
                     <span class="spotlight-kicker">Top result</span>
                     <h3 class="spotlight-title">${this.highlight(item.name)}</h3>

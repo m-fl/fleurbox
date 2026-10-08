@@ -3,6 +3,7 @@ const router = express.Router();
 const { spawn } = require('child_process');
 const db = require('../db');
 const { redact } = require('../services/redact');
+const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
 
 /**
  * Remux stream (container conversion only)
@@ -14,7 +15,7 @@ const { redact } = require('../services/redact');
  * 
  * Note: This does NOT fix Dolby/AC3 audio issues - use /api/transcode for that.
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAllowedUrl, async (req, res) => {
     const { url, audioTrack } = req.query;
     if (!url) {
         return res.status(400).json({ error: 'URL parameter is required' });
@@ -57,6 +58,7 @@ router.get('/', async (req, res) => {
         '-reconnect_delay_max', '5',
         // Prevent Range/HEAD requests that some providers reject with 405
         '-seekable', '0',
+        ...FFMPEG_PROTOCOLS,
         '-i', url,
         // STRICT MAPPING: Only map video and audio, ignore subtitles/data/attachments
         // This prevents remux failure when source container has incompatible subtitle tracks (e.g. MKV -> MP4)

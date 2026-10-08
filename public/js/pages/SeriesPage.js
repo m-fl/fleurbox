@@ -296,8 +296,8 @@ class SeriesPage {
 
             card.innerHTML = `
                 <div class="series-poster">
-                    <img src="${poster}" alt="${series.name}" 
-                         onerror="this.onerror=null;this.src='/img/placeholder.png'" loading="lazy">
+                    <img src="${escapeHtml(poster)}" alt="${escapeHtml(series.name)}" 
+                         data-fallback="/img/placeholder.png" loading="lazy">
                     <div class="series-play-overlay">
                         <span class="play-icon">${Icons.play}</span>
                     </div>
@@ -306,7 +306,7 @@ class SeriesPage {
                     </button>
                 </div>
                 <div class="series-card-info">
-                    <div class="series-title">${series.name}</div>
+                    <div class="series-title">${escapeHtml(series.name)}</div>
                     <div class="series-meta">
                         ${year ? `<span>${year}</span>` : ''}
                         ${rating ? `<span>${rating}</span>` : ''}
@@ -335,7 +335,10 @@ class SeriesPage {
         }
     }
 
-    /** opts.from: 'home' | 'search' when opened from Home (sets the Back target) */
+    /**
+     * opts.from: 'home' | 'search' when opened from Home (sets the Back target).
+     * opts.variants: the title's copies, already loaded (switching source).
+     */
     async showSeriesDetails(series, opts = {}) {
         this.currentSeries = series;
         this.detailsFrom = opts.from || null;
@@ -356,6 +359,7 @@ class SeriesPage {
         const token = this.detailsToken = (this.detailsToken || 0) + 1;
         // Header from the stored TMDB record now; re-run with series_info below
         this.renderSeriesMeta(series, {}, token);
+        this.renderSources(series, opts.variants, token);
 
         // Show loading
         this.seasonsContainer.innerHTML = '<div class="loading"><div class="loading-spinner"></div></div>';
@@ -393,10 +397,10 @@ class SeriesPage {
                     </div>
                     <div class="episode-list">
                         ${episodes.map(ep => `
-                            <div class="episode-item" data-episode-id="${ep.id}" data-source-id="${series.sourceId}" data-container="${ep.container_extension || 'mp4'}">
-                                <span class="episode-number">E${ep.episode_num}</span>
-                                <span class="episode-title">${ep.title || `Episode ${ep.episode_num}`}</span>
-                                <span class="episode-duration">${ep.duration || ''}</span>
+                            <div class="episode-item" data-episode-id="${escapeHtml(ep.id)}" data-source-id="${escapeHtml(series.sourceId)}" data-container="${escapeHtml(ep.container_extension || 'mp4')}">
+                                <span class="episode-number">E${escapeHtml(ep.episode_num)}</span>
+                                <span class="episode-title">${escapeHtml(ep.title || `Episode ${ep.episode_num}`)}</span>
+                                <span class="episode-duration">${escapeHtml(ep.duration)}</span>
                             </div>
                         `).join('')}
                     </div>
@@ -422,6 +426,29 @@ class SeriesPage {
             console.error('Error loading series info:', err);
             this.seasonsContainer.innerHTML = '<p class="hint" style="color: var(--color-error);">Error loading episodes</p>';
         }
+    }
+
+    /**
+     * Source picker: the same show in other categories (languages, dubs, ...).
+     * Picking one reopens the panel on that copy; its episodes come from it.
+     */
+    async renderSources(series, variants, token) {
+        const el = document.getElementById('series-sources');
+        if (!variants) {
+            el?.classList.add('hidden');
+            variants = await ContentDetails.variants('series', series.sourceId, series.series_id);
+            if (token !== this.detailsToken) return;
+        }
+        ContentDetails.renderSources(el, variants, series.sourceId, series.series_id, v => {
+            this.showSeriesDetails({
+                ...series,
+                series_id: v.itemId,
+                sourceId: v.sourceId,
+                category_id: v.categoryId,
+                name: v.name,
+                cover: v.streamIcon || series.cover
+            }, { from: this.detailsFrom, variants });
+        });
     }
 
     /**

@@ -303,13 +303,7 @@ class ChannelList {
     }
 
     escapeHtml(text) {
-        if (!text) return '';
-        return text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
+        return escapeHtml(text);
     }
 
     /**
@@ -417,16 +411,6 @@ class ChannelList {
      */
     isPinnedGroup(groupName) {
         return groupName === 'Favorites' || this.eventGroups.has(groupName);
-    }
-
-    /** "20:30", "Tomorrow 20:30" or "Sat 20:30", in local time */
-    eventTime(iso) {
-        const date = new Date(iso);
-        const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const days = Math.round((new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
-        if (days === 0) return time;
-        if (days === 1) return `Tomorrow ${time}`;
-        return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`;
     }
 
     renderGroups() {
@@ -619,7 +603,7 @@ class ChannelList {
                 : event ? `event-group ${event.live ? 'is-live' : ''} ${event.favourite ? 'is-favourite' : ''}` : '';
             const label = event
                 ? `<span class="group-name" title="${this.escapeHtml([event.competition, event.programme].filter(Boolean).join(' · '))}">${this.escapeHtml(event.title)}</span>
-            <span class="event-group-when">${event.live ? 'LIVE' : this.escapeHtml(this.eventTime(event.start))}</span>`
+            <span class="event-group-when">${event.live ? 'LIVE' : this.escapeHtml(HomePage.eventTime(event.start, event.timeTbd))}</span>`
                 : `<span class="group-name">${safeName}</span>`;
 
             html += `
@@ -682,15 +666,15 @@ class ChannelList {
 
             return `
           <div class="channel-item ${isActive ? 'active' : ''} ${isRenderActive ? 'nav-active' : ''} ${channelHidden ? 'hidden' : ''}"
-               data-channel-id="${channel.id}"
-               data-source-id="${channel.sourceId}"
-               data-source-type="${channel.sourceType}"
-               data-stream-id="${channel.streamId || ''}"
+               data-channel-id="${this.escapeHtml(channel.id)}"
+               data-source-id="${this.escapeHtml(channel.sourceId)}"
+               data-source-type="${this.escapeHtml(channel.sourceType)}"
+               data-stream-id="${this.escapeHtml(channel.streamId)}"
                data-url="${this.escapeHtml(channel.url || '')}"
                data-render-id="${this.escapeHtml(renderId)}"
                data-render-group="${this.escapeHtml(groupName)}">
             <img class="channel-logo" src="${this.getProxiedImageUrl(channel.tvgLogo)}"
-                 alt="" onerror="this.onerror=null;this.src='/img/placeholder.png'">
+                 alt="" data-fallback="/img/placeholder.png">
             <div class="channel-info">
               <div class="channel-name">${this.escapeHtml(channel.name)}</div>
               <div class="channel-program">${this.escapeHtml(this.getProgramInfo(channel) || '')}</div>
@@ -1161,10 +1145,10 @@ class ChannelList {
 
         div.innerHTML = `
             <img class="channel-logo" src="${this.getProxiedImageUrl(channel.tvgLogo)}" 
-                 alt="" onerror="this.onerror=null;this.src='/img/placeholder.png'">
+                 alt="" data-fallback="/img/placeholder.png">
             <div class="channel-info">
               <div class="channel-name">${this.escapeHtml(channel.name)}</div>
-              <div class="channel-program">${this.getProgramInfo(channel) || ''}</div>
+              <div class="channel-program">${this.escapeHtml(this.getProgramInfo(channel) || '')}</div>
             </div>
             <button class="favorite-btn active" title="Remove from Favorites">
               ❤️
@@ -1444,10 +1428,10 @@ class ChannelList {
             <div class="epg-info-modal">
                 <div class="channel-details">
                     <img class="channel-logo" src="${this.getProxiedImageUrl(channel.tvgLogo)}" 
-                         onerror="this.onerror=null;this.src='/img/placeholder.png'" />
+                         data-fallback="/img/placeholder.png" />
                     <div class="channel-meta">
                         <p><strong>Group:</strong> ${this.escapeHtml(channel.groupTitle || 'Uncategorized')}</p>
-                        <p><strong>Source:</strong> ${channel.sourceType}</p>
+                        <p><strong>Source:</strong> ${this.escapeHtml(channel.sourceType)}</p>
                         ${channel.tvgId ? `<p><strong>TVG ID:</strong> ${this.escapeHtml(channel.tvgId)}</p>` : ''}
                     </div>
                 </div>

@@ -23,6 +23,7 @@ async function loadDb() {
         favorites: data.favorites || [],
         settings: data.settings || getDefaultSettings(),
         users: data.users || [],
+        revokedTokens: data.revokedTokens || {},
         nextId: data.nextId || 1
       };
     } catch (error) {
@@ -114,7 +115,8 @@ async function saveDb(data) {
       const jsonString = JSON.stringify(data, null, 2);
       // Atomic write: write to temp file, then rename
       // Rename is atomic on most filesystems, preventing corruption on crash
-      await fs.writeFile(tmpPath, jsonString);
+      // 600: the file holds password hashes and provider logins
+      await fs.writeFile(tmpPath, jsonString, { mode: 0o600 });
       await fs.rename(tmpPath, dbPath);
     } catch (err) {
       console.error('Error writing database:', err);
@@ -467,4 +469,24 @@ const users = {
   }
 };
 
-module.exports = { loadDb, saveDb, sources, hiddenItems, favorites, settings, users, getDefaultSettings, getUserAgent, USER_AGENT_PRESETS };
+/**
+ * Tokens ended by logout before they expire: { jti: exp (unix seconds) }.
+ * Entries are dropped once the token would have expired anyway.
+ */
+const revokedTokens = {
+  async add(jti, exp) {
+    const db = await loadDb();
+    const now = Math.floor(Date.now() / 1000);
+    const kept = Object.fromEntries(Object.entries(db.revokedTokens || {}).filter(([, e]) => e > now));
+    kept[jti] = exp;
+    db.revokedTokens = kept;
+    await saveDb(db);
+  },
+
+  async has(jti) {
+    const db = await loadDb();
+    return Boolean(jti && db.revokedTokens?.[jti]);
+  }
+};
+
+module.exports = { loadDb, saveDb, revokedTokens, sources, hiddenItems, favorites, settings, users, getDefaultSettings, getUserAgent, USER_AGENT_PRESETS };

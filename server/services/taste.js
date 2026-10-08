@@ -113,6 +113,15 @@ const CATALOG = {
 // Which regions mean something for each sport (the quiz shows only those)
 CATALOG.sportRegions = Object.fromEntries(CATALOG.sports.map(s => [s.id,
     CATALOG.regions.map(r => r.id).filter(r => liveEvents.LEAGUES.some(l => l.sport === s.id && l.regions.includes(r)))]));
+// Levels to narrow a sport to ("college vs professional"), for sports whose leagues have them
+const DIVISION_LABELS = {
+    'american-football': { pro: 'Professional (NFL)', college: 'College (NCAA)' },
+    basketball: { pro: 'Professional (NBA, WNBA)', college: 'College (NCAA)' }
+};
+CATALOG.divisions = Object.fromEntries(Object.entries(DIVISION_LABELS).map(([sport, labels]) => [sport,
+    [...new Set(liveEvents.LEAGUES.filter(l => l.sport === sport && l.division).map(l => l.division))]
+        .map(id => ({ id: `${sport}:${id}`, label: labels[id] || id }))]));
+const divisionIds = new Set(Object.values(CATALOG.divisions).flat().map(d => d.id));
 const sportIds = new Set(CATALOG.sports.map(s => s.id));
 const regionIds = new Set(CATALOG.regions.map(r => r.id));
 
@@ -156,6 +165,8 @@ function sanitize(input) {
         mood: oneOf(input?.mood, CATALOG.moods, 'popular'),
         sports,
         regions: sports.length ? pick(input?.regions, regionIds, regionIds.size) : [],
+        // Only for picked sports
+        divisions: pick(input?.divisions, divisionIds, divisionIds.size).filter(d => sports.includes(d.split(':')[0])),
         teams: sports.length ? [...known.keys()] : []
     };
 }

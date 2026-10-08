@@ -12,6 +12,7 @@
  * - Automatic cleanup of stale sessions
  */
 
+const { FFMPEG_PROTOCOLS } = require('./urlGuard');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
@@ -204,7 +205,7 @@ class TranscodeSession extends EventEmitter {
             '-reconnect_delay_max', '3'
         );
 
-        args.push('-i', this.url);
+        args.push(...FFMPEG_PROTOCOLS, '-i', this.url);
 
         // Add seek offset if specified (as output option to avoid Range requests)
         if (this.options.seekOffset > 0) {
@@ -595,6 +596,9 @@ class TranscodeSession extends EventEmitter {
      */
     async getSegment(segmentName) {
         this.touch();
+        // A plain file name of this session ("seg_00012.ts"), never a path:
+        // Express decodes %2F, so "..%2F..%2Fetc%2Fpasswd" would leave the dir
+        if (!/^[\w-]+\.(ts|m4s|mp4|vtt)$/.test(String(segmentName))) return null;
         const segmentPath = path.join(this.dir, segmentName);
         try {
             await fs.access(segmentPath);

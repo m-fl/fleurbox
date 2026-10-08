@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { spawn } = require('child_process');
+const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
 
 /**
  * Subtitle extraction endpoint
@@ -8,7 +9,7 @@ const { spawn } = require('child_process');
  * 
  * Extracts a specific subtitle track and converts it to WebVTT on the fly.
  */
-router.get('/', (req, res) => {
+router.get('/', requireAllowedUrl, (req, res) => {
     const { url, index } = req.query;
 
     if (!url || index === undefined) {
@@ -24,8 +25,9 @@ router.get('/', (req, res) => {
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         '-probesize', '5000000',
         '-analyzeduration', '5000000',
+        ...FFMPEG_PROTOCOLS,
         '-i', url,
-        '-map', `0:${index}`,
+        '-map', `0:${parseInt(index, 10) || 0}`,
         '-c:s', 'webvtt',
         '-f', 'webvtt',
         '-'
