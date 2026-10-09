@@ -103,6 +103,7 @@ class SyncService {
             // (lazy requires: avoid a load cycle)
             require('./searchIndex').rebuild('playlist-sync');
             require('./tmdbSync').afterPlaylistSync();
+            require('./recommend').afterPlaylistSync();
         } catch (err) {
             console.error('[Sync] Global sync failed:', err);
         }

@@ -1,16 +1,14 @@
 /**
- * Which URLs the server may fetch (or hand to ffmpeg) on a user's behalf.
+ * Which URLs the server may fetch on a user's behalf.
  *
- * The proxy, probe, remux, subtitle and transcode routes take a URL from the
- * browser. Without a check, any logged-in account could point them at this
- * machine or the home network (router admin page, other containers) and read
- * the answer back. Allowed: http(s) URLs whose host resolves to public
- * addresses only, plus the hosts of configured sources (a provider on the LAN
- * still works).
- *
- * Not covered: ffmpeg follows redirects and playlist entries itself, and DNS
- * can change between the check and the fetch. The proxy's own fetches follow
- * redirects through guardedFetch, which checks every hop.
+ * Playback routes no longer take URLs from the browser at all - only stream
+ * references the server resolves itself (services/streamRef.js), so ffmpeg is
+ * only ever pointed at a provider. What still takes a URL is the image proxy
+ * (provider/TMDB artwork). Without a check, any logged-in account could point
+ * it at this machine or the home network and read the answer back. Allowed:
+ * http(s) URLs whose host resolves to public addresses only, plus the hosts of
+ * configured sources (a provider on the LAN still works). The stream proxy's
+ * own fetches also go through guardedFetch, which checks every redirect hop.
  */
 const dns = require('dns').promises;
 const net = require('net');

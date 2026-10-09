@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { spawn } = require('child_process');
-const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { requireStreamRef } = require('../services/streamRef');
 
 /**
  * Subtitle extraction endpoint
@@ -9,8 +10,9 @@ const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
  * 
  * Extracts a specific subtitle track and converts it to WebVTT on the fly.
  */
-router.get('/', requireAllowedUrl, (req, res) => {
-    const { url, index } = req.query;
+router.get('/', requireStreamRef, (req, res) => {
+    const { index } = req.query;
+    const url = req.streamUrl; // ?url= is a stream reference (services/streamRef.js)
 
     if (!url || index === undefined) {
         return res.status(400).json({ error: 'URL and index parameters are required' });

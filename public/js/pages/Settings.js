@@ -325,6 +325,17 @@ class SettingsPage {
         // User tab visibility is handled in show() method
         // when currentUser is available
 
+        // "Kids" is a viewer with a rating limit (and a Live TV whitelist)
+        const newRole = document.getElementById('new-role');
+        newRole?.addEventListener('change', () => {
+            document.getElementById('new-maturity-group')?.classList.toggle('hidden', newRole.value !== 'kids');
+        });
+        const editRole = document.getElementById('edit-role');
+        editRole?.addEventListener('change', () => {
+            document.getElementById('edit-kids-group')?.classList.toggle('hidden', editRole.value !== 'kids');
+        });
+        this.initKidsChannelPicker();
+
         // Handle add user form
         const addUserForm = document.getElementById('add-user-form');
         if (addUserForm) {
@@ -334,11 +345,20 @@ class SettingsPage {
                 const username = document.getElementById('new-username').value;
                 const password = document.getElementById('new-password').value;
                 const role = document.getElementById('new-role').value;
+                const kids = role === 'kids';
 
                 try {
-                    await API.users.create({ username, password, role });
-                    alert('User created successfully!');
+                    await API.users.create({
+                        username, password,
+                        role: kids ? 'viewer' : role,
+                        kids,
+                        maxMaturity: kids ? parseInt(document.getElementById('new-maturity').value, 10) : null
+                    });
+                    alert(kids
+                        ? 'Kids account created. Use Edit to choose which Live TV channels it may watch.'
+                        : 'User created successfully!');
                     addUserForm.reset();
+                    document.getElementById('new-maturity-group')?.classList.add('hidden');
                     this.loadUsers();
                 } catch (err) {
                     alert('Error creating user: ' + err.message);
@@ -369,7 +389,9 @@ class SettingsPage {
 
                 const roleBadge = user.role === 'admin'
                     ? '<span class="user-badge user-badge-admin">Admin</span>'
-                    : '<span class="user-badge user-badge-viewer">Viewer</span>';
+                    : user.kids
+                        ? '<span class="user-badge user-badge-kids">Kids</span>'
+                        : '<span class="user-badge user-badge-viewer">Viewer</span>';
 
                 return `
                 <tr>
@@ -439,8 +461,19 @@ class SettingsPage {
             if (editId) editId.value = user.id;
             if (editUsername) editUsername.value = user.username;
             if (editEmail) editEmail.value = user.email || '';
-            if (editRole) editRole.value = user.role;
+            if (editRole) editRole.value = user.kids ? 'kids' : user.role;
             if (editPassword) editPassword.value = '';
+
+            // Kids: rating limit and Live TV whitelist
+            document.getElementById('edit-kids-group')?.classList.toggle('hidden', !user.kids);
+            const editMaturity = document.getElementById('edit-maturity');
+            if (editMaturity) editMaturity.value = String(user.maxMaturity || 2);
+            this.kidsChannels = [...(user.allowedChannels || [])];
+            this.renderKidsChannels();
+            const pickerSearch = document.getElementById('kids-channel-search');
+            if (pickerSearch) pickerSearch.value = '';
+            const pickerResults = document.getElementById('kids-channel-results');
+            if (pickerResults) pickerResults.innerHTML = '';
 
             // Handle SSO specific UI
             const passwordHint = document.getElementById('edit-password-hint');
@@ -498,10 +531,17 @@ class SettingsPage {
         // Save Handler
         saveBtn.onclick = async () => {
             const userId = document.getElementById('edit-user-id').value;
+            const role = document.getElementById('edit-role').value;
+            const kids = role === 'kids';
             const updates = {
                 username: document.getElementById('edit-username').value,
-                role: document.getElementById('edit-role').value
+                role: kids ? 'viewer' : role,
+                kids
             };
+            if (kids) {
+                updates.maxMaturity = parseInt(document.getElementById('edit-maturity').value, 10);
+                updates.allowedChannels = this.kidsChannels || [];
+            }
 
             const newPassword = document.getElementById('edit-password').value;
             if (newPassword && !document.getElementById('edit-password').disabled) {
@@ -521,6 +561,152 @@ class SettingsPage {
         this.modalHandlersSetup = true;
     }
 
+
+    /**
+     * Kids accounts' Live TV whitelist: search channels, add/remove. Kept in
+     * this.kidsChannels ("sourceId:streamId") until Save.
+     */
+    initKidsChannelPicker() {
+        const input = document.getElementById('kids-channel-search');
+        const results = document.getElementById('kids-channel-results');
+        if (!input || !results) return;
+        this.kidsChannelNames = new Map();
+        let timer = null;
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            const q = input.value.trim();
+            if (q.length < 2) { results.innerHTML = ''; return; }
+            timer = setTimeout(async () => {
+                let found = [];
+                try {
+                    found = (await API.live.search(q, { limit: 40 })).channels || [];
+                } catch (err) {
+                    console.error('[Settings] Channel search failed:', err);
+                }
+                if (input.value.trim() !== q) return;
+                results.innerHTML = found.length ? found.map(ch => {
+                    const key = `${ch.sourceId}:${ch.streamId}`;
+                    this.kidsChannelNames.set(key, ch.name);
+                    const added = (this.kidsChannels || []).includes(key);
+                    return `<div class="kids-channel-row">
+                        <span class="kids-channel-name">${escapeHtml(ch.name)}<span class="hint"> · ${escapeHtml(ch.groupTitle || '')}</span></span>
+                        <button type="button" class="btn btn-sm ${added ? 'btn-ghost' : 'btn-secondary'}" data-add="${escapeHtml(key)}" ${added ? 'disabled' : ''}>${added ? 'Added' : 'Add'}</button>
+                    </div>`;
+                }).join('') : '<p class="hint">No channels found</p>';
+                results.querySelectorAll('[data-add]').forEach(btn => btn.addEventListener('click', () => {
+                    if (!this.kidsChannels.includes(btn.dataset.add)) this.kidsChannels.push(btn.dataset.add);
+                    btn.textContent = 'Added';
+                    btn.disabled = true;
+                    this.renderKidsChannels();
+                }));
+            }, 250);
+        });
+    }
+
+    async renderKidsChannels() {
+        const box = document.getElementById('kids-channels');
+        if (!box) return;
+        const keys = this.kidsChannels || [];
+        if (!keys.length) {
+            box.innerHTML = '<p class="hint">No channels yet: Live TV is empty for this profile.</p>';
+            return;
+        }
+        // Names of channels added in an earlier session: look them up
+        await Promise.all(keys.filter(k => !this.kidsChannelNames.has(k)).map(async key => {
+            const [sourceId, ...rest] = key.split(':');
+            try {
+                const ch = await API.live.channel(sourceId, rest.join(':'));
+                this.kidsChannelNames.set(key, ch.name);
+            } catch {
+                this.kidsChannelNames.set(key, `Channel ${rest.join(':')} (not in the playlist any more)`);
+            }
+        }));
+        box.innerHTML = keys.map(key => `
+            <span class="kids-channel-chip">${escapeHtml(this.kidsChannelNames.get(key) || key)}
+                <button type="button" aria-label="Remove" data-remove="${escapeHtml(key)}">&times;</button>
+            </span>`).join('');
+        box.querySelectorAll('[data-remove]').forEach(btn => btn.addEventListener('click', () => {
+            this.kidsChannels = this.kidsChannels.filter(k => k !== btn.dataset.remove);
+            this.renderKidsChannels();
+        }));
+    }
+
+    /**
+     * Settings > Title matches: name + year matches to confirm or reject
+     * (server/services/media.js). `reset` starts again from the first page.
+     */
+    async loadMatches(reset = false) {
+        const list = document.getElementById('match-list');
+        const more = document.getElementById('match-more');
+        const count = document.getElementById('match-count');
+        if (!list) return;
+        if (!this.matchesInit) {
+            this.matchesInit = true;
+            more?.addEventListener('click', () => this.loadMatches(false));
+            document.getElementById('match-confirm-page')?.addEventListener('click', () => {
+                const copies = [...list.querySelectorAll('.match-row:not(.is-decided)')].map(row => JSON.parse(row.dataset.copy));
+                if (copies.length && confirm(`Confirm all ${copies.length} matches shown?`)) this.decideMatches(copies, 'confirm');
+            });
+        }
+        if (reset) {
+            this.matchOffset = 0;
+            list.innerHTML = '';
+        }
+        let res;
+        try {
+            res = await API.request('GET', `/media/review?offset=${this.matchOffset}&limit=50`);
+        } catch (err) {
+            list.innerHTML = `<p class="hint">Could not load matches: ${escapeHtml(err.message)}</p>`;
+            return;
+        }
+        this.matchOffset += res.items.length;
+        if (count) count.textContent = `${res.total} to review`;
+        more?.classList.toggle('hidden', this.matchOffset >= res.total);
+        if (!res.items.length && reset) {
+            list.innerHTML = '<p class="hint">Nothing to review.</p>';
+            return;
+        }
+        const poster = url => url
+            ? `<img src="${escapeHtml(API.imageUrl(url))}" alt="" loading="lazy" data-fallback="/img/poster-placeholder.jpg">`
+            : '<img src="/img/poster-placeholder.jpg" alt="">';
+        list.insertAdjacentHTML('beforeend', res.items.map(m => {
+            const copy = { sourceId: m.source_id, itemType: m.item_type, itemId: m.item_id };
+            return `<div class="match-row" data-copy="${escapeHtml(JSON.stringify(copy))}">
+                <div class="match-side">${poster(m.copy_icon)}
+                    <div><div class="match-name">${escapeHtml(m.copy_name)}</div>
+                    <div class="hint">${escapeHtml(m.copy_category || '')}</div></div></div>
+                <div class="match-arrow" aria-hidden="true">→</div>
+                <div class="match-side">${poster(m.title_icon)}
+                    <div><div class="match-name">${escapeHtml(m.title || '')}${m.year ? ` (${m.year})` : ''}</div>
+                    <div class="hint">${m.kind === 'tv' ? 'Series' : 'Movie'} · ${escapeHtml(m.genres || 'no genres')} · ${m.title_copies} other cop${m.title_copies === 1 ? 'y' : 'ies'}</div></div></div>
+                <div class="match-actions">
+                    <button type="button" class="btn btn-sm btn-secondary" data-decide="confirm">Same title</button>
+                    <button type="button" class="btn btn-sm btn-ghost" data-decide="reject">Not the same</button>
+                </div>
+            </div>`;
+        }).join(''));
+        list.querySelectorAll('.match-row:not([data-bound])').forEach(row => {
+            row.dataset.bound = '1';
+            row.querySelectorAll('[data-decide]').forEach(btn => btn.addEventListener('click', () =>
+                this.decideMatches([JSON.parse(row.dataset.copy)], btn.dataset.decide)));
+        });
+    }
+
+    async decideMatches(copies, action) {
+        try {
+            await API.request('POST', '/media/review', { action, copies });
+        } catch (err) {
+            alert('Could not save: ' + err.message);
+            return;
+        }
+        const keys = new Set(copies.map(c => JSON.stringify(c)));
+        document.querySelectorAll('#match-list .match-row').forEach(row => {
+            if (!keys.has(row.dataset.copy)) return;
+            row.classList.add('is-decided');
+            row.querySelector('.match-actions').innerHTML =
+                `<span class="hint">${action === 'confirm' ? '✓ Confirmed' : '✕ Kept separate'}</span>`;
+        });
+    }
 
     async deleteUser(userId, username) {
         if (!confirm(`Are you sure you want to delete user "${username}"?`)) {
@@ -547,6 +733,10 @@ class SettingsPage {
         // Load users when switching to users tab
         if (tabName === 'users') {
             this.loadUsers();
+        }
+
+        if (tabName === 'matches') {
+            this.loadMatches(true);
         }
 
         // Load hardware info when switching to transcode tab
@@ -599,6 +789,8 @@ class SettingsPage {
             if (usersTab) {
                 usersTab.style.display = 'block';
             }
+            const matchesTab = document.getElementById('matches-tab');
+            if (matchesTab) matchesTab.style.display = 'block';
         }
 
         // Load sources when page is shown

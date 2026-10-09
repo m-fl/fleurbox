@@ -13,6 +13,8 @@ const cache = require('../services/cache');
 const languages = require('../services/languages');
 const taste = require('../services/taste');
 const liveEvents = require('../services/liveEvents');
+const recommend = require('../services/recommend');
+const maturity = require('../services/maturity');
 
 // Finished = watched to within the last 5% (credits)
 const FINISHED_RATIO = 0.95;
@@ -174,8 +176,15 @@ router.get('/trending', async (req, res) => {
         const cacheKey = `${kind}|${lang}|${hard}`;
         const fetchedAt = tmdbTrending.fetchedAt(kind);
         const cached = matchCache.get(cacheKey);
+        // Kids accounts: only titles rated within their limit
+        const kidsMax = maturity.limitFor(req.user);
+        const forUser = items => {
+            if (kidsMax === null) return items;
+            const levels = maturity.levels(items.map(i => `${kind}:${i.tmdb_id}`));
+            return items.filter(i => { const l = levels.get(`${kind}:${i.tmdb_id}`); return l !== null && l !== undefined && l <= kidsMax; });
+        };
         if (cached && cached.fetchedAt === fetchedAt && Date.now() - cached.at < 30 * 60 * 1000) {
-            return res.json(cached.items.slice(0, limit));
+            return res.json(forUser(cached.items).slice(0, limit));
         }
 
         const ids = tmdbTrending.ids(kind);
@@ -227,7 +236,7 @@ router.get('/trending', async (req, res) => {
             };
         });
         matchCache.set(cacheKey, { at: Date.now(), fetchedAt, items });
-        res.json(items.slice(0, limit));
+        res.json(forUser(items).slice(0, limit));
     } catch (err) {
         console.error('[Home] Trending failed:', err);
         res.status(500).json({ error: 'Trending unavailable' });
@@ -284,6 +293,25 @@ router.get('/sports/teams', async (req, res) => {
     } catch (err) {
         console.error('[Home] Sports teams failed:', err);
         res.status(500).json({ error: 'Teams unavailable' });
+    }
+});
+
+/**
+ * POST /api/home/feedback { kind: 'movie'|'tv', tmdbId, value: -1|0 }
+ * "Not for me" (-1): never recommended again, and counts against similar
+ * titles; 0 undoes it.
+ */
+router.post('/feedback', (req, res) => {
+    try {
+        const { kind, tmdbId } = req.body || {};
+        if (!['movie', 'tv'].includes(kind) || !/^\d+$/.test(String(tmdbId || ''))) {
+            return res.status(400).json({ error: 'kind (movie|tv) and tmdbId are required' });
+        }
+        const value = recommend.setFeedback(req.user.id, kind, tmdbId, req.body.value === -1 ? -1 : 0);
+        res.json({ feedback: value });
+    } catch (err) {
+        console.error('[Home] Feedback failed:', err);
+        res.status(500).json({ error: 'Failed to save feedback' });
     }
 });
 

@@ -2,6 +2,23 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const auth = require('../auth');
+const crypto = require('crypto');
+const maturity = require('../services/maturity');
+
+/**
+ * Kids account fields from a create/update body: { kids, maxMaturity } or an
+ * error message. Kids accounts are never admins.
+ */
+function kidsFields(body, role, current = null) {
+    if (body.kids === undefined && body.maxMaturity === undefined) {
+        return role === 'admin' && current?.kids ? { error: 'A kids account cannot be an admin' } : {};
+    }
+    const kids = !!body.kids;
+    if (kids && role === 'admin') return { error: 'A kids account cannot be an admin' };
+    const level = parseInt(body.maxMaturity, 10);
+    const maxMaturity = kids ? (maturity.LEVELS.some(l => l.id === level) ? level : maturity.DEFAULT_KIDS_LEVEL) : null;
+    return { kids, maxMaturity };
+}
 
 // Configure Passport strategies
 auth.configureLocalStrategy(
@@ -53,10 +70,47 @@ router.get('/oidc/callback',
  * LOGIN_WINDOW_MS - per client IP, and separately per username (so spreading
  * guesses over many IPs doesn't help) - further attempts get 429 until the
  * window has passed. A successful login clears that IP's and username's count.
+ *
+ * The per-username count would let anyone lock a user out by failing on
+ * purpose, so a browser that has logged in as that user before (it holds a
+ * signed "known device" cookie) is not counted with everyone else: it gets its
+ * own count instead. In memory: a restart clears every count.
  */
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const loginFailures = new Map(); // 'ip:<ip>' | 'user:<name>' -> [timestamps]
+const loginFailures = new Map(); // 'ip:<ip>' | 'user:<name>' | 'device:<sig>' -> [timestamps]
+
+const DEVICE_COOKIE = 'fleurbox_device';
+const DEVICE_MAX_AGE = 365 * 24 * 60 * 60 * 1000;
+
+function deviceSignature(name, issued) {
+    return crypto.createHmac('sha256', `fleurbox-device:${process.env.JWT_SECRET}`)
+        .update(`${name}\n${issued}`).digest('base64url');
+}
+
+/** Remember this browser as one that logged in as `name` */
+function setDeviceCookie(req, res, name) {
+    const issued = Date.now();
+    const value = `${Buffer.from(name).toString('base64url')}.${issued}.${deviceSignature(name, issued)}`;
+    res.cookie(DEVICE_COOKIE, value, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: req.secure,
+        path: '/api/auth',
+        maxAge: DEVICE_MAX_AGE
+    });
+}
+
+/** The signature of a valid known-device cookie for `name`, or null */
+function knownDevice(req, name) {
+    const match = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${DEVICE_COOKIE}=([^;]+)`));
+    if (!match) return null;
+    const [encName, issued, sig] = decodeURIComponent(match[1]).split('.');
+    if (!sig || Buffer.from(encName || '', 'base64url').toString() !== name) return null;
+    if (!(Date.now() - Number(issued) < DEVICE_MAX_AGE)) return null;
+    const expected = deviceSignature(name, issued);
+    return expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig)) ? sig : null;
+}
 
 function recentFailures(key) {
     const cutoff = Date.now() - LOGIN_WINDOW_MS;
@@ -65,9 +119,15 @@ function recentFailures(key) {
     return times;
 }
 
+function loginName(req) {
+    return String(req.body?.username || '').trim().toLowerCase();
+}
+
 function loginKeys(req) {
-    const name = String(req.body?.username || '').trim().toLowerCase();
-    return [`ip:${req.ip}`, ...(name ? [`user:${name}`] : [])];
+    const name = loginName(req);
+    if (!name) return [`ip:${req.ip}`];
+    const device = knownDevice(req, name);
+    return [`ip:${req.ip}`, device ? `device:${device}` : `user:${name}`];
 }
 
 function loginLimit(req, res, next) {
@@ -89,7 +149,9 @@ function recordLoginFailure(req) {
 }
 
 function clearLoginFailures(req) {
+    // The right password: whatever was counted against this user is moot
     loginKeys(req).forEach(key => loginFailures.delete(key));
+    if (loginName(req)) loginFailures.delete(`user:${loginName(req)}`);
 }
 
 // Forget idle entries so the map can't grow without bound
@@ -171,6 +233,7 @@ router.post('/login', loginLimit, (req, res, next) => {
             return res.status(401).json({ error: info?.message || 'Invalid credentials' });
         }
         clearLoginFailures(req);
+        setDeviceCookie(req, res, loginName(req));
 
         // Generate JWT token
         const token = auth.generateToken(user);
@@ -223,7 +286,9 @@ router.get('/me', auth.requireAuth, async (req, res) => {
         res.json({
             id: user.id,
             username: user.username,
-            role: user.role
+            role: user.role,
+            kids: !!user.kids,
+            maxMaturity: maturity.limitFor(user)
         });
     } catch (err) {
         console.error('Error in /me:', err);
@@ -272,11 +337,15 @@ router.post('/users', auth.requireAuth, auth.requireAdmin, async (req, res) => {
             return res.status(400).json({ error: 'Role must be either "admin" or "viewer"' });
         }
 
+        const kids = kidsFields(req.body, role);
+        if (kids.error) return res.status(400).json({ error: kids.error });
+
         const passwordHash = await auth.hashPassword(password);
         const newUser = await db.users.create({
             username,
             passwordHash,
-            role
+            role,
+            ...kids
         });
 
         res.status(201).json(newUser);
@@ -308,10 +377,11 @@ router.put('/users/:id', auth.requireAuth, auth.requireAdmin, async (req, res) =
             updates.passwordHash = await auth.hashPassword(password);
         }
 
-        // A new password or role ends the user's existing logins
-        if (password || role) {
-            const current = await db.users.getById(id);
-            updates.tokenVersion = (current?.tokenVersion || 0) + 1;
+        // A new password or a changed role ends the user's existing logins (the
+        // edit dialog always sends the role, so only an actual change counts)
+        const before = await db.users.getById(id);
+        if (password || (role && role !== before?.role)) {
+            updates.tokenVersion = (before?.tokenVersion || 0) + 1;
         }
 
         if (role) {
@@ -330,6 +400,16 @@ router.put('/users/:id', auth.requireAuth, auth.requireAdmin, async (req, res) =
             }
 
             updates.role = role;
+        }
+
+        const current = await db.users.getById(id);
+        const kids = kidsFields(req.body, role || current?.role, current);
+        if (kids.error) return res.status(400).json({ error: kids.error });
+        Object.assign(updates, kids);
+        // Kids accounts' Live TV whitelist: "sourceId:itemId" channel keys
+        if (Array.isArray(req.body.allowedChannels)) {
+            updates.allowedChannels = [...new Set(req.body.allowedChannels.map(String)
+                .filter(k => /^\d+:[A-Za-z0-9_.:-]{1,64}$/.test(k)))].slice(0, 2000);
         }
 
         const updatedUser = await db.users.update(id, updates);

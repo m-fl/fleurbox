@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { requireAdmin } = require('../auth');
 const { getDb } = require('../db/sqlite');
+const maturity = require('../services/maturity');
 
 // Helper to map API item types to DB types and tables
 function mapItemType(apiType) {
@@ -324,11 +325,12 @@ router.get('/search', async (req, res) => {
         languages.ensureSqlFunctions();
         const language = languages.LANGUAGES.some(l => l.id === req.query.lang) ? req.query.lang : '';
         const hardFilter = req.query.hard === '1' && language ? 1 : 0;
+        const kids = maturity.sqlFilter(req.user); // kids accounts only
         // Fetch one extra row to decide hasMore without a second COUNT query.
         const rows = db.prepare(`
             SELECT p.* FROM playlist_items p
             LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id
-            WHERE p.type = ?
+            WHERE p.type = ?${kids.sql}
               AND p.is_hidden = 0
               AND p.name REGEXP ?
               AND NOT EXISTS (
@@ -341,11 +343,13 @@ router.get('/search', async (req, res) => {
               AND (? = 0 OR lang_visible(p.name, c.name, ?) = 1)
             ORDER BY CASE WHEN lang_match(p.name, c.name, ?) = 1 THEN 0 ELSE 1 END, p.name
             LIMIT ? OFFSET ?
-        `).all(type, pattern, hardFilter, language, language, limit + 1, offset);
+        `).all(type, pattern, hardFilter, language, language, limit + 1, offset, ...(kids.sql ? [kids.params] : []));
 
         const hasMore = rows.length > limit;
-        const items = rows.slice(0, limit).map(item => ({
+        // Kids accounts: live results only from their whitelisted channels
+        const items = (type === 'live' ? maturity.filterChannels(req.user, rows.slice(0, limit)) : rows.slice(0, limit)).map(item => ({
             ...item,
+            stream_url: undefined, // played by reference (services/streamRef.js), never by URL
             // `data` is nullable; always hand the client an object so card
             // rendering never trips over null.
             data: item.data ? JSON.parse(item.data) : {}
@@ -367,9 +371,10 @@ router.get('/recent', async (req, res) => {
         }
 
         const db = getDb();
+        const kids = maturity.sqlFilter(req.user, 'p', null); // kids accounts only
         const recentItems = db.prepare(`
             SELECT * FROM playlist_items p
-            WHERE p.type = ? 
+            WHERE p.type = ? ${kids.sql}
               AND p.is_hidden = 0
               AND NOT EXISTS (
                   SELECT 1 FROM categories c 
@@ -380,11 +385,12 @@ router.get('/recent', async (req, res) => {
               )
             ORDER BY p.added_at DESC
             LIMIT ?
-        `).all(type, parseInt(limit));
+        `).all(type, parseInt(limit), ...(kids.sql ? [kids.params] : []));
 
         // Parse JSON data for each item
         const formatted = recentItems.map(item => ({
             ...item,
+            stream_url: undefined, // played by reference (services/streamRef.js), never by URL
             data: JSON.parse(item.data)
         }));
 

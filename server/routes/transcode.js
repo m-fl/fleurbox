@@ -7,7 +7,8 @@ const fs = require('fs').promises;
 const db = require('../db');
 const transcodeSession = require('../services/transcodeSession');
 const { redact } = require('../services/redact');
-const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { requireStreamRef } = require('../services/streamRef');
 
 /**
  * Transcode Routes
@@ -31,8 +32,9 @@ transcodeSession.startCleanupInterval();
  * POST /api/transcode/session
  * Body: { url: string, seekOffset?: number }
  */
-router.post('/session', requireAllowedUrl, async (req, res) => {
-    const { url, seekOffset, videoMode, videoCodec, audioCodec, audioChannels, audioTrack } = req.body;
+router.post('/session', requireStreamRef, async (req, res) => {
+    const url = req.streamUrl; // body.url is a stream reference (services/streamRef.js)
+    const { seekOffset, videoMode, videoCodec, audioCodec, audioChannels, audioTrack } = req.body;
 
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
@@ -58,7 +60,8 @@ router.post('/session', requireAllowedUrl, async (req, res) => {
             videoCodec: videoCodec, // 'h264', 'hevc', etc.
             audioCodec: audioCodec, // 'aac', 'ac3', etc.
             audioChannels: audioChannels, // number of channels (2=stereo)
-            audioTrack: Number.isInteger(audioTrack) ? audioTrack : 0 // which audio stream to use
+            audioTrack: Number.isInteger(audioTrack) ? audioTrack : 0, // which audio stream to use
+            ownerId: req.user.id // only this account (or an admin) may use or stop it
     };
 
     try {
@@ -101,12 +104,22 @@ router.post('/session', requireAllowedUrl, async (req, res) => {
 });
 
 /**
+ * The session, if it exists and belongs to the requesting account (admins may
+ * use any). Someone else's session answers 404, like a missing one.
+ */
+function ownSession(req) {
+    const session = transcodeSession.getSession(req.params.sessionId);
+    if (!session) return null;
+    if (req.user?.role === 'admin' || session.options.ownerId === req.user?.id) return session;
+    return null;
+}
+
+/**
  * Get HLS playlist for a session
  * GET /api/transcode/:sessionId/stream.m3u8
  */
 router.get('/:sessionId/stream.m3u8', async (req, res) => {
-    const { sessionId } = req.params;
-    const session = transcodeSession.getSession(sessionId);
+    const session = ownSession(req);
 
     if (!session) {
         return res.status(404).json({ error: 'Session not found' });
@@ -127,14 +140,14 @@ router.get('/:sessionId/stream.m3u8', async (req, res) => {
  * GET /api/transcode/:sessionId/:segment.ts
  */
 router.get('/:sessionId/:segment', async (req, res) => {
-    const { sessionId, segment } = req.params;
+    const { segment } = req.params;
 
     // Only handle .ts files
     if (!segment.endsWith('.ts')) {
         return res.status(404).json({ error: 'Invalid segment' });
     }
 
-    const session = transcodeSession.getSession(sessionId);
+    const session = ownSession(req);
     if (!session) {
         return res.status(404).json({ error: 'Session not found' });
     }
@@ -154,10 +167,13 @@ router.get('/:sessionId/:segment', async (req, res) => {
  * DELETE /api/transcode/:sessionId
  */
 router.delete('/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
+    const session = ownSession(req);
+    if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
 
     try {
-        await transcodeSession.removeSession(sessionId);
+        await transcodeSession.removeSession(session.id);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Failed to remove session', details: err.message });
@@ -180,8 +196,9 @@ router.get('/sessions', requireAdmin, (req, res) => {
  * Transcodes audio to AAC for browser compatibility while passing video through.
  * This fixes playback issues with Dolby/AC3/EAC3 audio that browsers can't decode.
  */
-router.get('/', requireAllowedUrl, async (req, res) => {
-    const { url, audioTrack } = req.query;
+router.get('/', requireStreamRef, async (req, res) => {
+    const { audioTrack } = req.query;
+    const url = req.streamUrl; // ?url= is a stream reference (services/streamRef.js)
     if (!url) {
         return res.status(400).json({ error: 'URL parameter is required' });
     }

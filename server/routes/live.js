@@ -18,6 +18,8 @@ const { getDb } = require('../db/sqlite');
 const languages = require('../services/languages');
 const liveEvents = require('../services/liveEvents');
 const taste = require('../services/taste');
+const streamRef = require('../services/streamRef');
+const maturity = require('../services/maturity');
 
 const UNCATEGORIZED = 'Uncategorized';
 
@@ -48,7 +50,7 @@ function toChannel(row, sourceTypes) {
         name: row.name,
         tvgId: data.epg_channel_id || data.tvgId || null,
         tvgLogo: row.stream_icon,
-        url: sourceType === 'm3u' ? (row.stream_url || data.stream_url || data.url) : undefined,
+        url: sourceType === 'm3u' ? streamRef.m3uRef(row.source_id, row.item_id) : undefined,
         groupId: `${sourceType}_${row.source_id}_${row.category_id}`,
         groupTitle: row.group_name || UNCATEGORIZED,
         sourceId: row.source_id,
@@ -72,6 +74,8 @@ function hiddenClause(includeHidden) {
 router.get('/groups', async (req, res) => {
     try {
         const sourceTypes = await liveSources(req.query.source);
+        // Kids accounts: only the channels a parent whitelisted (services/maturity.js)
+        const kidsAllowed = maturity.allowedChannels(req.user);
         const rows = getDb().prepare(`
             SELECT p.source_id, p.category_id, c.name AS group_name, count(*) AS count
             FROM playlist_items p
@@ -79,8 +83,9 @@ router.get('/groups', async (req, res) => {
             WHERE p.type = 'live'
               AND p.source_id IN (SELECT value FROM json_each(?))
               ${hiddenClause(req.query.includeHidden === '1')}
+              ${kidsAllowed ? `AND (p.source_id || ':' || p.item_id) IN (SELECT value FROM json_each(?))` : ''}
             GROUP BY p.source_id, CASE WHEN c.id IS NULL THEN NULL ELSE p.category_id END
-        `).all(JSON.stringify([...sourceTypes.keys()]));
+        `).all(JSON.stringify([...sourceTypes.keys()]), ...(kidsAllowed ? [JSON.stringify([...kidsAllowed])] : []));
 
         res.json(rows.map(r => ({
             name: r.group_name || UNCATEGORIZED,
@@ -117,7 +122,7 @@ router.get('/channels', async (req, res) => {
             ORDER BY p.rowid
         `).all(...(hasCategory ? [sourceId, String(req.query.categoryId)] : [sourceId]));
 
-        res.json(rows.map(r => toChannel(r, sourceTypes)));
+        res.json(maturity.filterChannels(req.user, rows).map(r => toChannel(r, sourceTypes)));
     } catch (err) {
         console.error('[Live] Channels failed:', err);
         res.status(500).json({ error: 'Failed to load channels' });
@@ -156,7 +161,7 @@ router.get('/search', async (req, res) => {
         `).all({ sources: JSON.stringify([...sourceTypes.keys()]), q, lang, limit: limit + 1 });
 
         res.json({
-            channels: rows.slice(0, limit).map(r => toChannel(r, sourceTypes)),
+            channels: maturity.filterChannels(req.user, rows.slice(0, limit)).map(r => toChannel(r, sourceTypes)),
             truncated: rows.length > limit
         });
     } catch (err) {
@@ -196,9 +201,9 @@ router.get('/favorites', async (req, res) => {
             SELECT source_id, item_id FROM favorites
             WHERE user_id = ? AND item_type = 'channel'
         `).all(req.user.id);
-        const channels = lookupChannels(
+        const channels = maturity.filterChannels(req.user, lookupChannels(
             favorites.map(f => ({ sourceId: f.source_id, itemId: f.item_id })),
-            await liveSources());
+            await liveSources()), c => c.sourceId, c => c.streamId);
         channels.sort((a, b) => a.name.localeCompare(b.name));
         res.json(channels);
     } catch (err) {
@@ -212,8 +217,9 @@ router.get('/favorites', async (req, res) => {
  */
 router.get('/channel', async (req, res) => {
     try {
-        const [channel] = lookupChannels([{ sourceId: req.query.sourceId, itemId: req.query.itemId }],
-            await liveSources());
+        const [channel] = maturity.filterChannels(req.user,
+            lookupChannels([{ sourceId: req.query.sourceId, itemId: req.query.itemId }], await liveSources()),
+            c => c.sourceId, c => c.streamId);
         if (!channel) return res.status(404).json({ error: 'Channel not found' });
         res.json(channel);
     } catch (err) {
@@ -301,10 +307,12 @@ router.get('/events', async (req, res) => {
             // Home: only what the user follows, once they've picked sports/teams
             mine: req.query.mine === '1'
         });
+        // Kids accounts: only whitelisted channels, and only events on one of them
+        const kids = !!maturity.allowedChannels(req.user);
         res.json(events.map(({ channelRows, ...e }) => ({
             ...e,
-            channels: channelRows.map(r => toChannel(r, sourceTypes))
-        })));
+            channels: maturity.filterChannels(req.user, channelRows).map(r => toChannel(r, sourceTypes))
+        })).filter(e => !kids || e.channels.length));
     } catch (err) {
         console.error('[Live] Events failed:', err);
         res.status(500).json({ error: 'Live events unavailable' });

@@ -429,7 +429,10 @@ class VideoPlayer {
         } else {
             const element = this.container;
             if (element.requestFullscreen) {
-                element.requestFullscreen().catch(err => console.error('Fullscreen error:', err));
+                element.requestFullscreen()
+                    // Phones: a TV picture wants landscape (Android allows locking it in fullscreen)
+                    .then(() => screen.orientation?.lock?.('landscape').catch(() => {}))
+                    .catch(err => console.error('Fullscreen error:', err));
             } else if (element.webkitRequestFullscreen) {
                 element.webkitRequestFullscreen();
             } else if (this.video.webkitEnterFullscreen) {
@@ -465,17 +468,21 @@ class VideoPlayer {
     /**
      * Copy current stream URL to clipboard
      */
-    copyStreamUrl() {
-        if (!this.currentUrl) {
+    async copyStreamUrl() {
+        if (!this.sourceUrl) {
             console.warn('[Player] No stream URL to copy');
             return;
         }
 
-        let streamUrl = this.currentUrl;
-
-        // If it's a relative URL, make it absolute
-        if (streamUrl.startsWith('/')) {
-            streamUrl = window.location.origin + streamUrl;
+        // The player holds a reference that needs a login; hand out a sealed
+        // link instead, which VLC and the like can open on their own
+        let streamUrl;
+        try {
+            streamUrl = await API.proxy.shareLink(this.sourceUrl);
+        } catch (err) {
+            console.error('[Player] Could not create a stream link:', err);
+            alert('Could not create a stream link.');
+            return;
         }
 
         const showPromptFallback = () => {
@@ -862,6 +869,7 @@ class VideoPlayer {
             // Stop current playback
             this.stop();
             this.updateTranscodeStatus('hidden');
+            window.app?.setNowPlaying?.(channel?.name, 'live');
 
             // Hide "select a channel" overlay
             this.overlay.classList.add('hidden');
@@ -872,6 +880,7 @@ class VideoPlayer {
 
             // Determine if HLS or direct stream
             this.currentUrl = streamUrl;
+            this.sourceUrl = streamUrl; // the stream reference, kept when currentUrl becomes a transcode/remux URL
 
             // CHECK: Auto Transcode (Smart) - probe first, then decide
             if (this.settings.autoTranscode) {
@@ -1378,6 +1387,7 @@ class VideoPlayer {
      * Get proxied URL for a stream
      */
     getProxiedUrl(url) {
+        if (url.startsWith('/api/stream/')) return url; // stream references already play through the server
         return `/api/proxy/stream?url=${encodeURIComponent(url)}`;
     }
 
@@ -1412,6 +1422,7 @@ class VideoPlayer {
      * Stop playback
      */
     stop() {
+        window.app?.clearNowPlaying?.('live');
         // Stop any running transcode session first
         this.stopTranscodeSession();
 
@@ -1578,17 +1589,6 @@ class VideoPlayer {
 
         const nextIdx = currentIdx >= channels.length - 1 ? 0 : currentIdx + 1;
         window.app.channelList.selectChannel({ channelId: channels[nextIdx].id });
-    }
-
-    /**
-     * Toggle fullscreen
-     */
-    toggleFullscreen() {
-        if (document.fullscreenElement) {
-            document.exitFullscreen();
-        } else if (this.container) {
-            this.container.requestFullscreen();
-        }
     }
 }
 

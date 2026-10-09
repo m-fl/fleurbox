@@ -157,7 +157,13 @@ function configureJwtStrategy(getUserById, isRevoked) {
             return done(null, {
                 id: user.id,
                 username: user.username,
-                role: user.role
+                role: user.role,
+                // signs stream links (services/streamRef.js), so they end with the logins
+                tokenVersion: user.tokenVersion || 0,
+                // kids accounts (services/maturity.js)
+                kids: !!user.kids,
+                maxMaturity: user.maxMaturity ?? null,
+                allowedChannels: user.allowedChannels || []
             });
         } catch (err) {
             return done(err, false);

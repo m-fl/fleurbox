@@ -500,6 +500,7 @@ class SeriesPage {
         // TMDB's overview replaces the list's plot; otherwise only fill a blank
         if (meta.plot && (local?.tmdb || !plotEl.textContent)) plotEl.textContent = meta.plot;
         document.getElementById('series-credits').innerHTML = ContentDetails.creditsHtml(meta);
+        ContentDetails.renderFeedback('series-feedback', local?.media);
     }
 
     hideDetails() {

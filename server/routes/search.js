@@ -3,6 +3,7 @@ const router = express.Router();
 const { requireAdmin } = require('../auth');
 const searchIndex = require('../services/searchIndex');
 const languages = require('../services/languages');
+const maturity = require('../services/maturity');
 
 /**
  * Full-text search over titles, categories and TMDB metadata.
@@ -41,7 +42,16 @@ router.get('/', (req, res) => {
         if (!result) {
             return res.status(400).json({ error: 'Nothing to search for - enter at least one word' });
         }
-        res.json({ items: result.items, hasMore: result.hasMore, offset, limit });
+        // Kids accounts: drop titles above their limit (or unrated) from the
+        // results; the search itself is the same for everyone
+        const kidsMax = maturity.limitFor(req.user);
+        let items = result.items;
+        if (kidsMax !== null) {
+            const levels = maturity.levels(items.map(i => i.group_key).filter(k => /^(movie|tv):/.test(k)));
+            items = items.filter(i => levels.has(i.group_key) && levels.get(i.group_key) !== null && levels.get(i.group_key) <= kidsMax);
+        }
+        if (type === 'live') items = maturity.filterChannels(req.user, items); // kids: whitelisted channels only
+        res.json({ items, hasMore: result.hasMore, offset, limit });
     } catch (err) {
         if (err.status) return res.status(err.status).json({ error: err.message });
         console.error('[Search] Query failed:', err);

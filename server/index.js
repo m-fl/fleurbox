@@ -229,11 +229,40 @@ app.use('/api/auth', require('./routes/auth'));
 const { requireAuth } = require('./auth');
 app.use('/api', (req, res, next) => {
     if (req.path === '/version') return next();
+    // Sealed stream links carry their own authorisation (services/streamRef.js)
+    if (req.path.startsWith('/stream/s/')) return next();
     return requireAuth(req, res, next);
+});
+
+// Kids accounts: Live TV plays only channels a parent whitelisted for them
+// (services/maturity.js allowedChannels); the lists themselves are filtered
+// in routes/live.js and the proxy. Movies/series are filtered per route.
+const LIVE_STREAM = [
+    /^\/stream\/x\/(\d+)\/live\/([A-Za-z0-9_-]+)\./,              // stream reference
+    /^\/proxy\/xtream\/(\d+)\/stream\/([A-Za-z0-9_-]+)\/live$/     // getStreamUrl
+];
+app.use('/api', (req, res, next) => {
+    const allowed = require('./services/maturity').allowedChannels(req.user);
+    if (!allowed) return next();
+    for (const re of LIVE_STREAM) {
+        const m = re.exec(req.path);
+        if (m && !allowed.has(`${m[1]}:${m[2]}`)) {
+            return res.status(403).json({ error: 'This channel is not enabled for this profile' });
+        }
+    }
+    // Probe/remux/transcode/subtitles take a reference in ?url= / body.url
+    const ref = String(req.query.url ?? req.body?.url ?? '');
+    const m = LIVE_STREAM[0].exec(ref.replace(/^\/api/, ''));
+    if (m && !allowed.has(`${m[1]}:${m[2]}`)) {
+        return res.status(403).json({ error: 'This channel is not enabled for this profile' });
+    }
+    next();
 });
 
 app.use('/api/sources', require('./routes/sources'));
 app.use('/api/proxy', require('./routes/proxy'));
+app.use('/api/stream', require('./routes/stream'));
+app.use('/api/media', require('./routes/media'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/live', require('./routes/live'));
 app.use('/api/favorites', require('./routes/favorites'));
@@ -284,6 +313,13 @@ app.listen(PORT, async () => {
         require('./services/tmdbPopularity').start();
     } catch (err) {
         console.error('[TMDB] Resume check failed:', err);
+    }
+
+    // Recommendations: library links to TMDB titles, maturity levels
+    try {
+        require('./services/recommend').start();
+    } catch (err) {
+        console.error('[Recommend] Start failed:', err);
     }
 
     // Sports fixtures for Live Events (ESPN, no key needed)

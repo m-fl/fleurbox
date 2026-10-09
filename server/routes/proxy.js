@@ -15,30 +15,10 @@ const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { Readable } = require('stream');
 const imageCache = require('../services/imageCache');
-const { guardedFetch, requireAllowedUrl } = require('../services/urlGuard');
 
-/**
- * The proxies pass on whatever a remote server sends, and serve it from this
- * site's own origin - so a link to /api/proxy/...?url=<a page with a script>
- * would run that script as Fleurbox, with access to the login token. Every
- * proxied response is therefore served sandboxed (no scripts, no same-origin
- * access even if a browser opens it as a page), and only media types pass
- * through as they are.
- */
-const PROXY_CSP = "default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; sandbox";
-function lockDown(req, res, next) {
-    res.set('Content-Security-Policy', PROXY_CSP);
-    res.set('X-Content-Type-Options', 'nosniff');
-    next();
-}
-
-// Types a stream, playlist, segment, key or subtitle legitimately comes as
-const STREAM_TYPE = /^(video\/|audio\/|application\/(vnd\.apple\.mpegurl|x-mpegurl|mpegurl|octet-stream|mp4|mp2t|dash\+xml)\b|binary\/octet-stream|text\/vtt\b)/i;
-
-/** Upstream content type, or octet-stream when it is anything else (text/html, svg...) */
-function streamType(type) {
-    return type && STREAM_TYPE.test(type) ? type : 'application/octet-stream';
-}
+const { proxyStream, lockDown } = require('./stream');
+const streamRef = require('../services/streamRef');
+const maturity = require('../services/maturity');
 
 // Default cache max age in hours
 const DEFAULT_MAX_AGE_HOURS = 24;
@@ -59,18 +39,23 @@ function getCategoriesFromDb(sourceId, type, includeHidden = false) {
     return cats;
 }
 
-// Helper to get formatted streams from DB
-function getStreamsFromDb(sourceId, type, categoryId = null, includeHidden = false) {
+// Helper to get formatted streams from DB. kidsMax: a kids account's limit
+// (services/maturity.js) - only titles rated within it; null = no filter
+function getStreamsFromDb(sourceId, type, categoryId = null, includeHidden = false, kidsMax = null) {
     const db = getDb();
     let query = `
         SELECT item_id, name, stream_icon, added_at, rating, container_extension, year, category_id, data
-        FROM playlist_items 
+        FROM playlist_items p
         WHERE source_id = ? AND type = ?
     `;
     if (!includeHidden) {
         query += ` AND is_hidden = 0`;
     }
     const params = [sourceId, type];
+    if (kidsMax !== null && type !== 'live') {
+        query += ` AND ${maturity.allowedSql('p', null).replace('@kidsMax', '?')}`;
+        params.push(kidsMax);
+    }
 
     if (categoryId) {
         query += ` AND category_id = ?`;
@@ -110,6 +95,13 @@ function toXtreamItem(item, type) {
 
 // --- Xtream Codes Proxy API --- //
 
+/** An Xtream auth answer without the login it echoes back (user_info.username/password) */
+function withoutLogin(data) {
+    if (!data?.user_info) return data;
+    const { username, password, ...userInfo } = data.user_info;
+    return { ...data, user_info: userInfo };
+}
+
 // Login / Authenticate
 router.get('/xtream/:sourceId', async (req, res) => {
     try {
@@ -122,7 +114,7 @@ router.get('/xtream/:sourceId', async (req, res) => {
         if (cached) return res.json(cached);
 
         const api = xtreamApi.createFromSource(source);
-        const data = await api.authenticate();
+        const data = withoutLogin(await api.authenticate());
         cache.set('xtream', source.id, 'auth', data);
         res.json(data);
     } catch (err) {
@@ -135,7 +127,13 @@ router.get('/xtream/:sourceId/live_categories', async (req, res) => {
     try {
         const sourceId = parseInt(req.params.sourceId);
         const includeHidden = req.query.includeHidden === 'true';
-        const cats = getCategoriesFromDb(sourceId, 'live', includeHidden);
+        let cats = getCategoriesFromDb(sourceId, 'live', includeHidden);
+        // Kids accounts: only categories holding a whitelisted channel
+        if (maturity.allowedChannels(req.user)) {
+            const withChannels = new Set(maturity.filterChannels(req.user,
+                getStreamsFromDb(sourceId, 'live', null, includeHidden), () => sourceId, s => s.stream_id).map(s => String(s.category_id)));
+            cats = cats.filter(c => withChannels.has(String(c.category_id)));
+        }
         res.json(cats);
     } catch (err) {
         console.error(err);
@@ -150,7 +148,7 @@ router.get('/xtream/:sourceId/live_streams', async (req, res) => {
         const categoryId = req.query.category_id;
         const includeHidden = req.query.includeHidden === 'true';
         const streams = getStreamsFromDb(sourceId, 'live', categoryId, includeHidden);
-        res.json(streams);
+        res.json(maturity.filterChannels(req.user, streams, () => sourceId, s => s.stream_id));
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Database error' });
@@ -176,7 +174,7 @@ router.get('/xtream/:sourceId/vod_streams', async (req, res) => {
         const sourceId = parseInt(req.params.sourceId);
         const categoryId = req.query.category_id;
         const includeHidden = req.query.includeHidden === 'true';
-        const streams = getStreamsFromDb(sourceId, 'movie', categoryId, includeHidden);
+        const streams = getStreamsFromDb(sourceId, 'movie', categoryId, includeHidden, maturity.limitFor(req.user));
         res.json(streams);
     } catch (err) {
         console.error(err);
@@ -203,7 +201,7 @@ router.get('/xtream/:sourceId/series', async (req, res) => {
         const sourceId = parseInt(req.params.sourceId);
         const categoryId = req.query.category_id;
         const includeHidden = req.query.includeHidden === 'true';
-        const streams = getStreamsFromDb(sourceId, 'series', categoryId, includeHidden);
+        const streams = getStreamsFromDb(sourceId, 'series', categoryId, includeHidden, maturity.limitFor(req.user));
         res.json(streams);
     } catch (err) {
         console.error(err);
@@ -271,6 +269,10 @@ router.get('/browse/:type', async (req, res) => {
         if (lang && req.query.hard === '1') {
             where += ' AND lang_visible(p.name, c.name, @lang) = 1';
         }
+        // Kids accounts: only titles rated within their limit (adults: no change)
+        const kids = maturity.sqlFilter(req.user);
+        where += kids.sql;
+        Object.assign(params, kids.params);
         // Provider order, with the priority language first
         const order = lang
             ? 'CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END, p.rowid'
@@ -348,41 +350,18 @@ router.get('/xtream/:sourceId/vod_info', async (req, res) => {
     }
 });
 
-// Get Stream URL for playback
-// Returns the direct stream URL for a given stream ID
-router.get('/xtream/:sourceId/stream/:streamId/:type', async (req, res) => {
+// Stream "URL" for playback: a reference the server resolves (services/streamRef.js),
+// so the provider login in the real URL never reaches the browser
+router.get('/xtream/:sourceId/stream/:streamId/:type?', async (req, res) => {
     try {
         const source = await sources.getById(req.params.sourceId);
         if (!source || source.type !== 'xtream') {
             return res.status(404).json({ error: 'Xtream source not found' });
         }
-
-        const streamId = req.params.streamId;
-        const type = req.params.type || 'live';
-        const container = req.query.container || 'm3u8';
-
-        // Construct the Xtream stream URL
-        // Format: http://server:port/live/username/password/streamId.container (for live)
-        // Format: http://server:port/movie/username/password/streamId.container (for movie)
-        // Format: http://server:port/series/username/password/streamId.container (for series)
-
-        let streamUrl;
-        const baseUrl = source.url.replace(/\/$/, ''); // Remove trailing slash
-
-        if (type === 'live') {
-            streamUrl = `${baseUrl}/live/${source.username}/${source.password}/${streamId}.${container}`;
-        } else if (type === 'movie') {
-            streamUrl = `${baseUrl}/movie/${source.username}/${source.password}/${streamId}.${container}`;
-        } else if (type === 'series') {
-            streamUrl = `${baseUrl}/series/${source.username}/${source.password}/${streamId}.${container}`;
-        } else {
-            return res.status(400).json({ error: 'Invalid stream type' });
-        }
-
-        res.json({ url: streamUrl });
+        const { streamId, type = 'live' } = req.params;
+        res.json({ url: streamRef.xtreamRef(source.id, streamId, type, req.query.container || 'm3u8') });
     } catch (err) {
-        console.error('Error getting stream URL:', err);
-        res.status(500).json({ error: 'Failed to get stream URL' });
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
@@ -399,7 +378,8 @@ router.get('/m3u/:sourceId', async (req, res) => {
         const includeHidden = req.query.includeHidden === 'true';
 
         // Fetch from DB
-        const channels = getStreamsFromDb(sourceId, 'live', null, includeHidden);
+        const channels = maturity.filterChannels(req.user, getStreamsFromDb(sourceId, 'live', null, includeHidden),
+            () => sourceId, s => s.stream_id);
         const groups = getCategoriesFromDb(sourceId, 'live', includeHidden);
 
         // Format for frontend helper
@@ -414,7 +394,8 @@ router.get('/m3u/:sourceId', async (req, res) => {
             ...c,
             id: c.stream_id,
             groupTitle: c.category_id || 'Uncategorized',
-            url: c.stream_url || c.url,
+            url: streamRef.m3uRef(sourceId, c.stream_id),
+            stream_url: undefined, // the playlist's own URL stays on the server
             tvgLogo: c.stream_icon
         }));
 
@@ -549,7 +530,7 @@ router.get('/xtream/:sourceId/:action', async (req, res) => {
         let data;
         switch (action) {
             case 'auth':
-                data = await api.authenticate();
+                data = withoutLogin(await api.authenticate());
                 break;
             case 'live_categories':
                 data = await api.getLiveCategories();
@@ -590,29 +571,6 @@ router.get('/xtream/:sourceId/:action', async (req, res) => {
         res.json(data);
     } catch (err) {
         console.error('Xtream proxy error:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * Get Xtream stream URL
- * GET /api/proxy/xtream/:sourceId/stream/:streamId
- */
-router.get('/xtream/:sourceId/stream/:streamId/:type?', async (req, res) => {
-    try {
-        const source = await sources.getById(req.params.sourceId);
-        if (!source || source.type !== 'xtream') {
-            return res.status(404).json({ error: 'Xtream source not found' });
-        }
-
-        const api = xtreamApi.createFromSource(source);
-        const { streamId, type = 'live' } = req.params;
-        const { container = 'm3u8' } = req.query;
-
-        const url = api.buildStreamUrl(streamId, type, container);
-        res.json({ url });
-    } catch (err) {
-        console.error('Stream URL error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -715,191 +673,12 @@ router.post('/epg/:sourceId/channels', async (req, res) => {
 });
 
 /**
- * Proxy stream for playback
- * This handles CORS for streams that don't allow cross-origin
- * Supports HTTP Range requests for video seeking
+ * Proxy a stream reference for playback (CORS, mixed content, Range for seeking)
+ * GET /api/proxy/stream?url=<stream reference>  - same as GET <stream reference>
  */
-router.get('/stream', lockDown, requireAllowedUrl, async (req, res) => {
-    const maxRetries = 2;
-    let lastError = null;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            let { url } = req.query;
-            if (!url) {
-                return res.status(400).json({ error: 'URL required' });
-            }
-
-            // Forward some headers to be more "transparent" back to the origin
-            // Pluto TV uses multiple domains for content delivery
-            const plutoDomains = ['pluto.tv', 'pluto.io', 'plutotv.net', 'siloh.pluto.tv', 'service-stitcher'];
-            const isPluto = plutoDomains.some(domain => url.includes(domain));
-
-            const headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                // Using https and matching the origin of the request
-                'Origin': isPluto ? 'https://pluto.tv' : new URL(url).origin,
-                'Referer': isPluto ? 'https://pluto.tv/' : new URL(url).origin + '/'
-            };
-
-            // Forward Range header for video seeking support
-            const rangeHeader = req.get('range');
-            if (rangeHeader) {
-                headers['Range'] = rangeHeader;
-            }
-
-            const response = await guardedFetch(url, { headers });
-
-            // Retry on 5xx errors (transient upstream issues)
-            if (response.status >= 500 && attempt < maxRetries) {
-                console.log(`[Proxy] Upstream 5xx error (attempt ${attempt}/${maxRetries}), retrying in 500ms...`);
-                await new Promise(r => setTimeout(r, 500));
-                continue;
-            }
-
-            if (!response.ok) {
-                console.error(`Upstream error for ${redact(url).substring(0, 100)}...: ${response.status} ${response.statusText}`);
-                if (response.status === 403) {
-                    const errorBody = await response.text().catch(() => 'N/A');
-                    console.error(`403 Response body: ${errorBody.substring(0, 200)}`);
-                }
-                return res.status(response.status).type('text/plain').send(`Failed to fetch stream: ${response.statusText}`);
-            }
-
-            const contentType = response.headers.get('content-type') || '';
-            res.set('Access-Control-Allow-Origin', '*');
-
-            // Forward range-related headers for video seeking support
-            const contentLength = response.headers.get('content-length');
-            const contentRange = response.headers.get('content-range');
-            const acceptRanges = response.headers.get('accept-ranges');
-
-            if (contentLength) {
-                res.set('Content-Length', contentLength);
-            }
-            if (contentRange) {
-                res.set('Content-Range', contentRange);
-            }
-            if (acceptRanges) {
-                res.set('Accept-Ranges', acceptRanges);
-            } else if (contentLength && !contentRange) {
-                // If server supports content-length but didn't explicitly state accept-ranges,
-                // we can safely assume it supports byte ranges
-                res.set('Accept-Ranges', 'bytes');
-            }
-
-            // Set status code (206 for partial content when range request was made)
-            res.status(response.status);
-
-            // Create an async iterator for the response body
-            const iterator = response.body[Symbol.asyncIterator]();
-            const first = await iterator.next();
-
-            if (first.done) {
-                res.set('Content-Type', streamType(contentType));
-                return res.end();
-            }
-
-            const firstChunk = Buffer.from(first.value);
-
-            // Peek at first bytes to check for HLS manifest ({ #EXTM3U })
-            const textPrefix = firstChunk.subarray(0, 7).toString('utf8');
-            const contentLooksLikeHls = textPrefix === '#EXTM3U';
-
-            if (contentLooksLikeHls) {
-                // HLS Manifest: We must read the WHOLE manifest to rewrite it
-                const chunks = [firstChunk];
-
-                // Consume the rest of the stream
-                let result = await iterator.next();
-                while (!result.done) {
-                    chunks.push(Buffer.from(result.value));
-                    result = await iterator.next();
-                }
-
-                const buffer = Buffer.concat(chunks);
-                const finalUrl = response.url || url;
-                console.log(`[Proxy] Processing HLS manifest from: ${redact(finalUrl).substring(0, 100)}...`);
-                res.set('Content-Type', 'application/vnd.apple.mpegurl');
-
-                let manifest = buffer.toString('utf-8');
-
-                const finalUrlObj = new URL(finalUrl);
-                const baseUrl = finalUrlObj.origin + finalUrlObj.pathname.substring(0, finalUrlObj.pathname.lastIndexOf('/') + 1);
-
-                manifest = manifest.split('\n').map(line => {
-                    const trimmed = line.trim();
-                    if (trimmed === '' || trimmed.startsWith('#')) {
-                        // Handle both URI="..." and URI='...' formats
-                        if (trimmed.includes('URI=')) {
-                            // Replace both double and single quoted URIs
-                            return line.replace(/URI=["']([^"']+)["']/g, (match, p1) => {
-                                try {
-                                    const absoluteUrl = new URL(p1, baseUrl).href;
-                                    return `URI="${req.protocol}://${req.get('host')}${req.baseUrl}/stream?url=${encodeURIComponent(absoluteUrl)}"`;
-                                } catch (e) {
-                                    return match;
-                                }
-                            });
-                        }
-                        return line;
-                    }
-
-                    // Stream URL handling
-                    try {
-                        let absoluteUrl;
-                        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-                            absoluteUrl = trimmed;
-                        } else {
-                            absoluteUrl = new URL(trimmed, baseUrl).href;
-                        }
-                        return `${req.protocol}://${req.get('host')}${req.baseUrl}/stream?url=${encodeURIComponent(absoluteUrl)}`;
-                    } catch (e) { return line; }
-                }).join('\n');
-
-                return res.send(manifest);
-            }
-
-            // Binary content (Video Segment or Key): Collect and send
-            console.log(`[Proxy] Serving binary content (${contentType})`);
-            res.set('Content-Type', streamType(contentType));
-
-            // For small files (like encryption keys), collect all data and send at once
-            // This ensures proper Content-Length and response completion
-            const chunks = [firstChunk];
-            let result = await iterator.next();
-            while (!result.done) {
-                chunks.push(Buffer.from(result.value));
-                result = await iterator.next();
-            }
-            const fullContent = Buffer.concat(chunks);
-
-            // Set Content-Length for proper client handling
-            res.set('Content-Length', fullContent.length);
-            res.send(fullContent);
-            return; // Success - exit the retry loop
-
-        } catch (err) {
-            // A redirect to a private address: refused, not retried
-            if (err.status === 403 || err.status === 400) {
-                return res.status(err.status).json({ error: err.message });
-            }
-            lastError = err;
-            console.error(`Stream proxy error (attempt ${attempt}/${maxRetries}):`, err.message);
-            if (attempt < maxRetries) {
-                console.log('[Proxy] Retrying after error...');
-                await new Promise(r => setTimeout(r, 500));
-                continue;
-            }
-        }
-    }
-
-    // All retries failed
-    if (!res.headersSent) {
-        res.status(500).json({ error: lastError?.message || 'Stream proxy failed after retries' });
-    }
+router.get('/stream', lockDown, streamRef.requireStreamRef, (req, res) => {
+    if (!req.streamUrl) return res.status(400).json({ error: 'URL required' });
+    return proxyStream(req, res, req.streamUrl, req.user);
 });
 
 /**

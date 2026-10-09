@@ -3,6 +3,8 @@ const router = express.Router();
 const { getDb } = require('../db/sqlite');
 const { settings: settingsDb } = require('../db');
 const languages = require('../services/languages');
+const maturity = require('../services/maturity');
+const recommend = require('../services/recommend');
 
 // Movie vs tv comes from the category: the provider files ~10k series under
 // type 'movie' (see searchIndex.js)
@@ -46,6 +48,12 @@ router.get('/', (req, res) => {
 
         if (!row) return res.json({ found: false, tmdb: false, category: '', info: {} });
 
+        // Kids accounts: a title above their limit (or unrated) doesn't open
+        const kidsMax = maturity.limitFor(req.user);
+        if (kidsMax !== null && !(row.tmdb_id && row.maturity !== null && row.maturity <= kidsMax)) {
+            return res.status(403).json({ error: 'Not available on this profile' });
+        }
+
         const data = row.data ? JSON.parse(row.data) : {};
         const tmdb = !!row.tmdb_id;
         const info = tmdb
@@ -56,6 +64,8 @@ router.get('/', (req, res) => {
                 genre: row.genres || data.genre || '',
                 director: row.directors || data.director || '',
                 cast: row.cast_names || data.cast || '',
+                keywords: row.keywords || '',
+                certification: row.certification || '',
                 releasedate: row.release_date || data.releaseDate || '',
                 rating: row.vote_average ? Math.round(row.vote_average * 10) / 10 : (data.rating || ''),
                 // formatRuntime() reads movie seconds / series minutes per episode
@@ -72,7 +82,9 @@ router.get('/', (req, res) => {
                 episode_run_time: data.episode_run_time
             };
 
-        res.json({ found: true, tmdb, category: row.category_name || '', info });
+        // The TMDB title this copy belongs to, and the user's "Not for me" on it
+        const media = tmdb ? { kind: row.kind, tmdbId: row.tmdb_id, feedback: recommend.getFeedback(req.user.id, row.kind, row.tmdb_id) } : null;
+        res.json({ found: true, tmdb, category: row.category_name || '', info, media });
     } catch (err) {
         console.error('[Details] Lookup failed:', err);
         res.status(500).json({ error: 'Details lookup failed' });

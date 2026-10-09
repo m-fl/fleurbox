@@ -1,8 +1,9 @@
 /**
  * TMDB metadata backfill
  *
- * Fetches overview, tagline, genres, runtime, rating, director(s) and cast from
- * TMDB for every distinct TMDB id in the synced playlist (movies + series) and
+ * Fetches overview, tagline, genres, runtime, rating, director(s), cast,
+ * keywords and the age rating (certification) from TMDB - one request per
+ * title - for every distinct TMDB id in the synced playlist (movies + series) and
  * stores them in the local `tmdb_meta` table, so details and search never call
  * TMDB (or the IPTV provider) at view time.
  *
@@ -13,7 +14,8 @@
  *    row (across all workers) -> stop ('rate_limited')
  *  - 401 -> stop ('auth_failed'); MAX_CONSECUTIVE_ERRORS network/5xx in a row -> stop ('errors')
  * A title is fetched once: stored rows (including 'not_found') are never
- * re-fetched. Vote counts, the only part that drifts, are kept current by
+ * re-fetched - except 'ok' rows stored before keywords/certification were
+ * fetched (extras_at / recs_at NULL), which are fetched once more to fill those in. Vote counts, the only part that drifts, are kept current by
  * tmdbPopularity's rolling most-rated crawl.
  *
  * State is persisted in `tmdb_sync_state`, so progress survives restarts and a
@@ -22,6 +24,7 @@
 
 const { getDb } = require('../db/sqlite');
 const tmdbStats = require('./tmdbStats');
+const maturity = require('./maturity');
 
 const API_BASE = 'https://api.themoviedb.org/3';
 const REQUESTS_PER_SECOND = 10;           // cap on request starts (TMDB ceiling ~40)
@@ -33,6 +36,29 @@ const MAX_ERROR_RETRIES = 3;              // per item, for network/5xx
 const CAST_LIMIT = 15;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Whose age rating to keep: the first of these countries that has one
+const CERT_COUNTRIES = ['US', 'GB', 'NL'];
+
+/**
+ * Age rating from a details answer: movies' release_dates (theatrical/digital
+ * releases carry it), TV's content_ratings ("TV-MA", "TV-Y7"...). Null if none.
+ */
+function certificationOf(kind, d) {
+    for (const country of CERT_COUNTRIES) {
+        if (kind === 'movie') {
+            const entry = (d.release_dates?.results || []).find(r => r.iso_3166_1 === country);
+            const dates = (entry?.release_dates || []).filter(r => r.certification);
+            // theatrical (3) first, then whatever release has one
+            const cert = (dates.find(r => r.type === 3) || dates[0])?.certification;
+            if (cert) return `${country === 'US' ? '' : country + ' '}${cert}`;
+        } else {
+            const cert = (d.content_ratings?.results || []).find(r => r.iso_3166_1 === country)?.rating;
+            if (cert) return `${country === 'US' ? '' : country + ' '}${cert}`;
+        }
+    }
+    return null;
+}
 
 class TmdbSync {
     constructor() {
@@ -91,9 +117,27 @@ class TmdbSync {
         `);
         // Added later: how well known a title is (see services/tmdbPopularity.js)
         const columns = new Set(getDb().prepare('PRAGMA table_info(tmdb_meta)').all().map(c => c.name));
-        for (const [name, type] of [['popularity', 'REAL'], ['vote_count', 'INTEGER'], ['fame', 'REAL']]) {
+        // keywords: TMDB keyword names, comma separated; certification: age rating
+        // (US, else GB/NL); extras_at: when those two were fetched (NULL = not yet)
+        for (const [name, type] of [['popularity', 'REAL'], ['vote_count', 'INTEGER'], ['fame', 'REAL'],
+            ['keywords', 'TEXT'], ['certification', 'TEXT'], ['extras_at', 'INTEGER'],
+            // maturity: services/maturity.js level 0-4 (NULL unknown); recs_at: when
+            // TMDB's recommendations for it were stored in tmdb_recs
+            ['maturity', 'INTEGER'], ['recs_at', 'INTEGER']]) {
             if (!columns.has(name)) getDb().exec(`ALTER TABLE tmdb_meta ADD COLUMN ${name} ${type}`);
         }
+        // TMDB's "recommendations" for a title (from its users' ratings): the
+        // collaborative half of "Because you watched X" (services/recommend.js)
+        getDb().exec(`
+            CREATE TABLE IF NOT EXISTS tmdb_recs (
+                kind TEXT NOT NULL,
+                tmdb_id TEXT NOT NULL,
+                rec_kind TEXT NOT NULL,
+                rec_id TEXT NOT NULL,
+                rank INTEGER NOT NULL,          -- 0 = TMDB's first pick
+                PRIMARY KEY (kind, tmdb_id, rec_kind, rec_id)
+            )
+        `);
         this.tablesReady = true;
     }
 
@@ -112,7 +156,7 @@ class TmdbSync {
 
     /**
      * Distinct (kind, tmdb_id) pairs in the playlist that are missing from
-     * tmdb_meta
+     * tmdb_meta, or stored without keywords/certification yet
      */
     pendingWork() {
         this.ensureTables();
@@ -129,10 +173,11 @@ class TmdbSync {
                   AND CAST(json_extract(p.data, '$.tmdb') AS TEXT) GLOB '[1-9]*'
                   AND CAST(json_extract(p.data, '$.tmdb') AS TEXT) NOT GLOB '*[^0-9]*'
             )
-            SELECT w.kind, w.tmdb_id FROM wanted w
+            SELECT w.kind, w.tmdb_id, m.tmdb_id IS NULL AS fresh FROM wanted w
             LEFT JOIN tmdb_meta m ON m.kind = w.kind AND m.tmdb_id = w.tmdb_id
-            WHERE m.tmdb_id IS NULL
-            ORDER BY w.kind, CAST(w.tmdb_id AS INTEGER)
+            WHERE m.tmdb_id IS NULL OR (m.status = 'ok' AND (m.extras_at IS NULL OR m.recs_at IS NULL))
+            -- titles never fetched first, then the keyword/rating top-up
+            ORDER BY m.tmdb_id IS NOT NULL, w.kind, CAST(w.tmdb_id AS INTEGER)
         `).all();
     }
 
@@ -202,6 +247,7 @@ class TmdbSync {
         this.saveState(state);
         this.running = false;
         if (state.ok > 0) require('./searchIndex').rebuild(`tmdb-${finalState}`);
+        if (state.ok > 0) require('./recommend').afterTmdbSync();
         console.log(`[TMDB] Backfill ${finalState}${reason ? ` (${reason})` : ''}: ` +
             `${state.done}/${state.total} done, ${state.ok} ok, ${state.notFound} not found, ` +
             `${state.errors} errors, ${state.rateLimitHits} rate-limit waits`);
@@ -238,6 +284,7 @@ class TmdbSync {
             (items.length < pendingTotal ? ` of ${pendingTotal} pending` : ''));
 
         let consecutiveErrors = 0;
+        let freshSinceRebuild = 0;
         let next = 0;
         let halt = null; // { reason, detail } - first terminal condition wins
         this.consecutive429 = 0;
@@ -250,7 +297,7 @@ class TmdbSync {
                     halt = { reason: 'requested' };
                     break;
                 }
-                const { kind, tmdb_id } = items[next++];
+                const { kind, tmdb_id, fresh } = items[next++];
                 const result = await this.fetchOne(kind, tmdb_id, state);
 
                 if (result === 'auth_failed') {
@@ -270,13 +317,18 @@ class TmdbSync {
                 } else {
                     consecutiveErrors = 0;
                     if (result === 'ok') state.ok++;
+                    if (result === 'ok' && fresh) freshSinceRebuild++;
                     if (result === 'not_found') state.notFound++;
                 }
 
                 state.done++;
                 if (state.done % 25 === 0) this.saveState(state);
-                // Make new metadata searchable as it arrives
-                if (state.done % 5000 === 0) require('./searchIndex').rebuild('tmdb-progress');
+                // Make new titles searchable as they arrive (the keyword/rating
+                // top-up of known titles changes nothing search reads)
+                if (freshSinceRebuild >= 5000) {
+                    freshSinceRebuild = 0;
+                    require('./searchIndex').rebuild('tmdb-progress');
+                }
                 if (state.done % 1000 === 0) {
                     console.log(`[TMDB] Progress: ${state.done}/${state.total} (${state.rateLimitHits} rate-limit waits)`);
                 }
@@ -293,7 +345,8 @@ class TmdbSync {
      * Fetch + store one item. Returns 'ok' | 'not_found' | 'error' | 'auth_failed' | 'rate_limited'
      */
     async fetchOne(kind, tmdbId, state) {
-        const url = `${API_BASE}/${kind}/${tmdbId}?language=en-US&append_to_response=credits`;
+        const extras = kind === 'movie' ? 'release_dates' : 'content_ratings';
+        const url = `${API_BASE}/${kind}/${tmdbId}?language=en-US&append_to_response=credits,keywords,recommendations,${extras}`;
         let errorRetries = 0;
 
         while (true) {
@@ -361,23 +414,33 @@ class TmdbSync {
             .slice(0, CAST_LIMIT)
             .map(p => p.name);
         const runtime = kind === 'movie' ? d.runtime : (d.episode_run_time || [])[0];
+        // Movies list keywords under .keywords, TV under .results
+        const keywords = (d.keywords?.keywords || d.keywords?.results || []).map(k => k.name).filter(Boolean);
+        const certification = certificationOf(kind, d);
+        const genres = (d.genres || []).map(g => g.name).join(', ') || null;
+        const level = maturity.levelOf({ certification, genres, keywords: keywords.join(', ') });
+        const now = Math.floor(Date.now() / 1000);
 
         getDb().prepare(`
             INSERT INTO tmdb_meta (kind, tmdb_id, status, title, overview, tagline, genres, runtime,
-                                   release_date, vote_average, vote_count, popularity, directors, cast_names, fetched_at)
-            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   release_date, vote_average, vote_count, popularity, directors, cast_names,
+                                   keywords, certification, maturity, extras_at, recs_at, fetched_at)
+            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(kind, tmdb_id) DO UPDATE SET
                 status = 'ok', title = excluded.title, overview = excluded.overview,
                 tagline = excluded.tagline, genres = excluded.genres, runtime = excluded.runtime,
                 release_date = excluded.release_date, vote_average = excluded.vote_average,
                 vote_count = excluded.vote_count, popularity = excluded.popularity,
-                directors = excluded.directors, cast_names = excluded.cast_names, fetched_at = excluded.fetched_at
+                directors = excluded.directors, cast_names = excluded.cast_names,
+                keywords = excluded.keywords, certification = excluded.certification,
+                maturity = excluded.maturity, extras_at = excluded.extras_at,
+                recs_at = excluded.recs_at, fetched_at = excluded.fetched_at
         `).run(
             kind, String(tmdbId),
             d.title || d.name || null,
             d.overview || null,
             d.tagline || null,
-            (d.genres || []).map(g => g.name).join(', ') || null,
+            genres,
             runtime || null,
             d.release_date || d.first_air_date || null,
             typeof d.vote_average === 'number' ? d.vote_average : null,
@@ -385,8 +448,24 @@ class TmdbSync {
             typeof d.popularity === 'number' ? d.popularity : null,
             directors.join(', ') || null,
             cast.join(', ') || null,
-            Math.floor(Date.now() / 1000)
+            keywords.join(', ') || null,
+            certification,
+            level,
+            now, now, now
         );
+        this.storeRecs(kind, tmdbId, d.recommendations?.results || []);
+    }
+
+    storeRecs(kind, tmdbId, results) {
+        const db = getDb();
+        const insert = db.prepare(`INSERT OR REPLACE INTO tmdb_recs (kind, tmdb_id, rec_kind, rec_id, rank) VALUES (?, ?, ?, ?, ?)`);
+        db.transaction(() => {
+            db.prepare('DELETE FROM tmdb_recs WHERE kind = ? AND tmdb_id = ?').run(kind, String(tmdbId));
+            results.slice(0, 20).forEach((r, i) => {
+                const recKind = r.media_type === 'tv' || r.media_type === 'movie' ? r.media_type : kind;
+                if (r.id) insert.run(kind, String(tmdbId), recKind, String(r.id), i);
+            });
+        })();
     }
 
     storeNotFound(kind, tmdbId) {

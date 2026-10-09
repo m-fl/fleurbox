@@ -216,13 +216,15 @@ const ContentDetails = {
     },
 
     /**
-     * Year · runtime · rating row, then the playlist category and genre chips
+     * Year · runtime · age rating · rating row, the playlist category and genre
+     * chips, then the TMDB keywords (what it's about, beyond the broad genres)
      */
     metaHtml(info, category) {
         const date = info.releasedate || info.releaseDate || info.release_date || info.year || '';
         const year = String(date).substring(0, 4);
         const rating = parseFloat(info.rating);
-        const parts = [year, this.formatRuntime(info), rating > 0 ? `★ ${rating}` : ''].filter(Boolean);
+        const parts = [year, this.formatRuntime(info), info.certification || '', rating > 0 ? `★ ${rating}` : ''].filter(Boolean);
+        const keywords = (info.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
         const genres = (info.genre || '').split(',').map(g => g.trim()).filter(Boolean);
 
         const metaRow = parts.length
@@ -233,9 +235,46 @@ const ContentDetails = {
             : '';
         const genreChips = genres.map(g => `<span class="details-chip">${this.escape(g)}</span>`).join('');
 
+        const keywordChips = keywords.length
+            ? `<div class="details-chips details-keywords" aria-label="Keywords">${keywords.map(k =>
+                `<span class="details-chip details-keyword">${this.escape(k)}</span>`).join('')}</div>`
+            : '';
+
         const tagline = info.tagline ? `<div class="details-tagline">${this.escape(info.tagline)}</div>` : '';
         return tagline + metaRow +
-            (categoryChip || genreChips ? `<div class="details-chips">${categoryChip}${genreChips}</div>` : '');
+            (categoryChip || genreChips ? `<div class="details-chips">${categoryChip}${genreChips}</div>` : '') +
+            keywordChips;
+    },
+
+    /**
+     * "Not for me" toggle (button #id) for the TMDB title the panel shows.
+     * `media` is /api/details' { kind, tmdbId, feedback }; hidden without one.
+     * Marked titles never appear in For You and count against similar ones.
+     */
+    renderFeedback(id, media) {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.classList.toggle('hidden', !media);
+        if (!media) return;
+        const draw = value => {
+            btn.classList.toggle('is-active', value === -1);
+            btn.textContent = value === -1 ? '✕ Not for me (undo)' : 'Not for me';
+            btn.title = value === -1
+                ? 'Hidden from your recommendations. Click to undo.'
+                : "Don't recommend this, and fewer like it";
+        };
+        draw(media.feedback);
+        btn.onclick = async () => {
+            const next = media.feedback === -1 ? 0 : -1;
+            try {
+                const res = await API.request('POST', '/home/feedback', { kind: media.kind, tmdbId: media.tmdbId, value: next });
+                media.feedback = res.feedback;
+                draw(media.feedback);
+                window.app?.pages?.home && (window.app.pages.home.forYouSignature = null);
+            } catch (err) {
+                console.error('[Details] Feedback failed:', err);
+            }
+        };
     },
 
     /**

@@ -142,6 +142,21 @@ class HomePage {
                     </div>
                 </section>
 
+                <section class="dashboard-section hidden" id="team-events-section">
+                    <div class="section-header">
+                        <h2>Your Teams: Coming Up</h2>
+                    </div>
+                    <div class="scroll-wrapper">
+                        <button class="scroll-arrow scroll-left" aria-label="Scroll left">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                        </button>
+                        <div class="horizontal-scroll" id="team-events-list"></div>
+                        <button class="scroll-arrow scroll-right" aria-label="Scroll right">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </button>
+                    </div>
+                </section>
+
                 <div id="for-you"></div>
 
                 <!-- Hidden for now (Live Events and For You cover it); may come back -->
@@ -357,16 +372,31 @@ class HomePage {
 
         let events = [];
         try {
-            events = await window.API.live.events(20, true);
+            events = await window.API.live.events(30, true);
         } catch (err) {
             console.warn('[Dashboard] Live events unavailable:', err);
         }
         if (!list.isConnected) return;
+
+        // Your teams' games that haven't started get their own row; a live one
+        // leads the Live Events row
+        const upcomingTeams = events.filter(e => e.favourite && !e.live);
+        const rest = events.filter(e => !(e.favourite && !e.live));
+        const liveTeams = rest.filter(e => e.favourite);
+        this.fillEventRow(section, list, [...liveTeams, ...rest.filter(e => !e.favourite)]);
+        const teamSection = document.getElementById('team-events-section');
+        const teamList = document.getElementById('team-events-list');
+        if (teamSection && teamList) this.fillEventRow(teamSection, teamList, upcomingTeams);
+        this.updateScrollArrows();
+    }
+
+    /** Render event cards into one row (hidden when there are none) */
+    fillEventRow(section, list, events) {
         if (!events.length) {
             section.classList.add('hidden');
+            list.innerHTML = '';
             return;
         }
-
         section.classList.remove('hidden');
         list.innerHTML = events.map(e => this.createEventCard(e)).join('');
         list.querySelectorAll('.event-card').forEach((card, i) => {
@@ -379,7 +409,6 @@ class HomePage {
                 }
             });
         });
-        this.updateScrollArrows();
     }
 
     /**
@@ -650,7 +679,9 @@ class HomePage {
         if (gen !== this.forYouGen || !wrap.isConnected) return;
 
         cta.classList.toggle('hidden', !!res.profile);
-        if (!res.profile) {
+        // Rows from watch history show with or without the quiz
+        this.hasTasteProfile = !!res.profile;
+        if (!res.profile && !res.rows.length) {
             wrap.innerHTML = '';
             return;
         }
@@ -682,7 +713,7 @@ class HomePage {
                 <section class="dashboard-section for-you-row" style="--r:${r}">
                     <div class="section-header">
                         <h2>${this.escapeHtml(row.title)}</h2>
-                        ${r === 0 ? '<button class="taste-edit" data-action="quiz">Retake quiz</button>' : ''}
+                        ${r === 0 && this.hasTasteProfile ? '<button class="taste-edit" data-action="quiz">Retake quiz</button>' : ''}
                     </div>
                     <div class="scroll-wrapper">
                         <button class="scroll-arrow scroll-left" aria-label="Scroll left">

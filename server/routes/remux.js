@@ -3,7 +3,8 @@ const router = express.Router();
 const { spawn } = require('child_process');
 const db = require('../db');
 const { redact } = require('../services/redact');
-const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { FFMPEG_PROTOCOLS } = require('../services/urlGuard');
+const { requireStreamRef } = require('../services/streamRef');
 
 /**
  * Remux stream (container conversion only)
@@ -15,8 +16,9 @@ const { requireAllowedUrl, FFMPEG_PROTOCOLS } = require('../services/urlGuard');
  * 
  * Note: This does NOT fix Dolby/AC3 audio issues - use /api/transcode for that.
  */
-router.get('/', requireAllowedUrl, async (req, res) => {
-    const { url, audioTrack } = req.query;
+router.get('/', requireStreamRef, async (req, res) => {
+    const { audioTrack } = req.query;
+    const url = req.streamUrl; // ?url= is a stream reference (services/streamRef.js)
     if (!url) {
         return res.status(400).json({ error: 'URL parameter is required' });
     }

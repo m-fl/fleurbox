@@ -123,14 +123,13 @@ class App {
             this.navigateTo('home');
         });
 
-        // Now Playing indicator
-        const nowPlayingBtn = document.getElementById('now-playing-indicator');
-        if (nowPlayingBtn) {
-            nowPlayingBtn.addEventListener('click', (e) => {
+        // Now Playing links (menu + phone bar): back to whatever plays in the background
+        ['now-playing-indicator', 'now-playing-mini'].forEach(id => {
+            document.getElementById(id)?.addEventListener('click', (e) => {
                 e.preventDefault();
-                this.navigateTo('watch');
+                this.navigateTo(this.nowPlaying?.page || 'watch');
             });
-        }
+        });
 
         // Toggle groups button
         document.getElementById('toggle-groups').addEventListener('click', () => {
@@ -288,6 +287,35 @@ class App {
 
         if (this.pages[pageName]?.show) {
             this.pages[pageName].show();
+        }
+        this.updateNowPlaying();
+    }
+
+    /**
+     * What plays in the background ('watch' = movie/series, 'live' = Live TV),
+     * for the Now Playing links. Only one thing plays at a time.
+     */
+    setNowPlaying(title, page) {
+        this.nowPlaying = { title: title || 'Now Playing', page };
+        this.updateNowPlaying();
+    }
+
+    clearNowPlaying(page) {
+        if (this.nowPlaying && this.nowPlaying.page !== page) return;
+        this.nowPlaying = null;
+        this.updateNowPlaying();
+    }
+
+    updateNowPlaying() {
+        const np = this.nowPlaying;
+        const menu = document.getElementById('now-playing-indicator');
+        const mini = document.getElementById('now-playing-mini');
+        menu?.classList.toggle('hidden', !np);
+        // The phone link is only needed away from the player
+        mini?.classList.toggle('hidden', !np || this.currentPage === np.page);
+        for (const id of ['now-playing-text', 'now-playing-mini-text']) {
+            const el = document.getElementById(id);
+            if (el && np) el.textContent = np.title;
         }
     }
 }

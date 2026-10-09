@@ -400,6 +400,9 @@ const users = {
       // For OIDC users, passwordHash is optional
       passwordHash: userData.passwordHash || null,
       role: userData.role || 'viewer',
+      // Kids account: only titles rated up to maxMaturity (services/maturity.js)
+      kids: !!userData.kids,
+      maxMaturity: userData.kids ? (userData.maxMaturity || null) : null,
       oidcId: userData.oidcId || null,
       email: userData.email || null,
       createdAt: new Date().toISOString()

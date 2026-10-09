@@ -453,22 +453,14 @@ class WatchPage {
      * Show Now Playing indicator in navbar
      */
     showNowPlaying(title) {
-        const indicator = document.getElementById('now-playing-indicator');
-        const textEl = document.getElementById('now-playing-text');
-        if (indicator && textEl) {
-            textEl.textContent = title || 'Now Playing';
-            indicator.classList.remove('hidden');
-        }
+        this.app?.setNowPlaying(title, 'watch');
     }
 
     /**
      * Hide Now Playing indicator in navbar
      */
     hideNowPlaying() {
-        const indicator = document.getElementById('now-playing-indicator');
-        if (indicator) {
-            indicator.classList.add('hidden');
-        }
+        this.app?.clearNowPlaying('watch');
     }
 
     /**
@@ -945,17 +937,21 @@ class WatchPage {
     /**
      * Copy current stream URL to clipboard
      */
-    copyStreamUrl() {
+    async copyStreamUrl() {
         if (!this.currentUrl) {
             console.warn('[WatchPage] No stream URL to copy');
             return;
         }
 
-        let streamUrl = this.currentUrl;
-
-        // If it's a relative URL, make it absolute
-        if (streamUrl.startsWith('/')) {
-            streamUrl = window.location.origin + streamUrl;
+        // The player holds a reference that needs a login; hand out a sealed
+        // link instead, which VLC and the like can open on their own
+        let streamUrl;
+        try {
+            streamUrl = await API.proxy.shareLink(this.currentUrl);
+        } catch (err) {
+            console.error('[WatchPage] Could not create a stream link:', err);
+            alert('Could not create a stream link.');
+            return;
         }
 
         const showPromptFallback = () => {

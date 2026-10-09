@@ -212,6 +212,16 @@ const API = {
                 API.request('GET', `/proxy/xtream/${sourceId}/stream/${streamId}/${type}?container=${container}`)
         },
 
+        /**
+         * A link to a stream that external players (VLC...) can open without
+         * logging in, valid for a day. `ref` is the /api/stream/... reference
+         * the player was given; resolves to an absolute URL.
+         */
+        shareLink: async (ref) => {
+            const { url } = await API.request('GET', `/stream/link?url=${encodeURIComponent(ref)}`);
+            return window.location.origin + url;
+        },
+
         // EPG
         epg: {
             get: (sourceId) => API.request('GET', `/proxy/epg/${sourceId}`),

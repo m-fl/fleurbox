@@ -422,6 +422,7 @@ class MoviesPage {
         this.currentMovieInfo = info;
 
         metaEl.innerHTML = ContentDetails.metaHtml({ ...info, rating: info.rating || movie.rating }, category);
+        ContentDetails.renderFeedback('movie-feedback', local?.media);
         plotEl.textContent = info.plot || info.description || movie.plot || '';
         creditsEl.innerHTML = ContentDetails.creditsHtml(info);
     }

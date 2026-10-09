@@ -12,7 +12,7 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <!-- Appearance from Profile (ProfilePage.applyAppearance), set before the first paint -->
   <script src="/js/appearance.js?v=2"></script>
-  <link rel="stylesheet" href="css/main.css?v=20">
+  <link rel="stylesheet" href="css/main.css?v=24">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@800&family=Meow+Script&display=swap"
@@ -40,6 +40,11 @@
           <circle cx="33.9" cy="20.6" r="2.3" fill="#D97757" stroke="none"/>
         </svg></span>
         <span class="brand-text">fleurbox</span>
+      </a>
+      <!-- Phones: the menu folds away, so what's playing gets its own link in the bar -->
+      <a href="#" class="now-playing-indicator now-playing-mini hidden" id="now-playing-mini" aria-label="Back to what's playing">
+        <span class="now-playing-icon">▶</span>
+        <span class="now-playing-text" id="now-playing-mini-text">Now Playing</span>
       </a>
       <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu">
         <span></span>
@@ -364,6 +369,7 @@
                 <button class="btn btn-primary details-play-btn" id="movie-play-btn">
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="icon"><path d="M8 5v14l11-7z" /></svg> Play
                 </button>
+                <button class="btn btn-ghost details-not-for-me hidden" id="movie-feedback" type="button"></button>
               </div>
             </div>
           </div>
@@ -411,6 +417,7 @@
                 <div id="series-sources" class="details-sources hidden"></div>
                 <p id="series-plot"></p>
                 <div id="series-credits"></div>
+                <button class="btn btn-ghost details-not-for-me hidden" id="series-feedback" type="button"></button>
               </div>
             </div>
             <div id="series-seasons" class="series-seasons"></div>
@@ -436,6 +443,7 @@
             <button class="tab" data-tab="transcode">Transcoding</button>
             <button class="tab" data-tab="content">Manage Content</button>
             <button class="tab" data-tab="users" id="users-tab" style="display:none;">Users</button>
+            <button class="tab" data-tab="matches" id="matches-tab" style="display:none;">Title matches</button>
           </div>
 
           <!-- Sources Tab -->
@@ -832,6 +840,19 @@
           </div>
 
           <!-- Users Tab (Admin Only) -->
+          <div id="tab-matches" class="tab-content">
+            <div class="settings-section">
+              <h3>Title matches</h3>
+              <p class="hint">Copies without a TMDB id that Fleurbox matched to a title by name and year. Confirmed matches join that title (search, Source picker, history); rejected ones stay their own title.</p>
+              <div class="match-toolbar">
+                <span id="match-count" class="hint"></span>
+                <button type="button" class="btn btn-sm btn-secondary" id="match-confirm-page">Confirm all shown</button>
+              </div>
+              <div id="match-list" class="match-list"></div>
+              <button type="button" class="btn btn-sm btn-ghost hidden" id="match-more">Show more</button>
+            </div>
+          </div>
+
           <div id="tab-users" class="tab-content">
             <div class="settings-section">
               <h3>User Management</h3>
@@ -871,8 +892,18 @@
                     <label for="new-role">Role</label>
                     <select id="new-role" name="role" class="form-input" required>
                       <option value="viewer">Viewer</option>
+                      <option value="kids">Kids</option>
                       <option value="admin">Admin</option>
                     </select>
+                  </div>
+                  <div class="form-group hidden" id="new-maturity-group">
+                    <label for="new-maturity">Allowed ratings</label>
+                    <select id="new-maturity" class="form-input">
+                      <option value="1">Young kids (TV-Y, TV-Y7, G)</option>
+                      <option value="2" selected>Kids (up to PG, TV-PG)</option>
+                      <option value="3">Teens (up to PG-13, TV-14)</option>
+                    </select>
+                    <p class="hint">Movies and series rated on TMDB up to this level. Live TV: only channels you enable (Edit, after creating).</p>
                   </div>
                   <button type="submit" class="btn btn-primary">Add User</button>
                 </form>
@@ -1166,8 +1197,23 @@
             <label for="edit-role">Role</label>
             <select id="edit-role" name="role" class="form-input" required>
               <option value="viewer">Viewer</option>
+              <option value="kids">Kids</option>
               <option value="admin">Admin</option>
             </select>
+          </div>
+
+          <div class="modal-form-group hidden" id="edit-kids-group">
+            <label for="edit-maturity">Allowed ratings</label>
+            <select id="edit-maturity" class="form-input">
+              <option value="1">Young kids (TV-Y, TV-Y7, G)</option>
+                      <option value="2" selected>Kids (up to PG, TV-PG)</option>
+                      <option value="3">Teens (up to PG-13, TV-14)</option>
+            </select>
+            <label for="kids-channel-search" style="margin-top: var(--space-md);">Live TV channels</label>
+            <p class="hint">Only these channels show and play for this profile.</p>
+            <div class="kids-channels" id="kids-channels"></div>
+            <input type="search" id="kids-channel-search" class="form-input" placeholder="Search channels to add…" autocomplete="off">
+            <div class="kids-channel-results" id="kids-channel-results"></div>
           </div>
 
           <div class="modal-form-group">
@@ -1194,24 +1240,24 @@
 
   <!-- JavaScript -->
   <script src="/js/icons.js?v=3"></script>
-  <script src="/js/api.js?v=11"></script>
-  <script src="/js/components/ContentDetails.js?v=10"></script>
-  <script src="/js/components/VideoPlayer.js?v=7"></script>
+  <script src="/js/api.js?v=12"></script>
+  <script src="/js/components/ContentDetails.js?v=12"></script>
+  <script src="/js/components/VideoPlayer.js?v=9"></script>
   <script src="/js/components/ChannelList.js?v=10"></script>
   <script src="/js/components/SourceManager.js?v=6"></script>
   <script src="/js/components/EpgGuide.js?v=6"></script>
   <script src="/js/components/TasteQuiz.js?v=7"></script>
   <script src="/js/components/HomeSidebar.js?v=5"></script>
-  <script src="/js/pages/HomePage.js?v=24"></script>
+  <script src="/js/pages/HomePage.js?v=26"></script>
   <script src="/js/pages/LivePage.js?v=4"></script>
   <script src="/js/pages/Guide.js?v=4"></script>
-  <script src="/js/pages/MoviesPage.js?v=14"></script>
-  <script src="/js/pages/SeriesPage.js?v=12"></script>
-  <script src="/js/pages/Settings.js?v=5"></script>
-  <script src="/js/pages/WatchPage.js?v=7"></script>
+  <script src="/js/pages/MoviesPage.js?v=15"></script>
+  <script src="/js/pages/SeriesPage.js?v=13"></script>
+  <script src="/js/pages/Settings.js?v=7"></script>
+  <script src="/js/pages/WatchPage.js?v=9"></script>
   <script src="/js/pages/ProfilePage.js?v=4"></script>
   <script src="/js/pages/EventPage.js?v=4"></script>
-  <script src="/js/app.js?v=11"></script>
+  <script src="/js/app.js?v=12"></script>
 </body>
 
 </html>

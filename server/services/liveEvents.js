@@ -479,6 +479,59 @@ function namesBoth(title, homeVariants, awayVariants) {
     return b.some(([bs, be]) => a.some(([as, ae]) => be <= as || ae <= bs));
 }
 
+// Doubled letters come and go in spellings ("Bucaneers"): titles and names are
+// matched with runs of one letter squeezed to one
+const squeeze = text => text.replace(/([a-z])\1+/g, '$1');
+
+// "Game 4", "GM 4", ", G3": a series game number that must agree with ESPN's note
+const GAME_NO = /\b(?:game|gm|g)\s*(\d)\b/i;
+function gameConflict(text, note) {
+    const want = note && GAME_NO.exec(note);
+    const got = GAME_NO.exec(text);
+    return !!(want && got && want[1] !== got[1]);
+}
+
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+const DAY = 24 * HOUR;
+/**
+ * Calendar days (UTC day numbers) a channel name is dated with: "2026-10-09",
+ * "08-10-2026", "Thu 08 Oct", "@ Oct 9". Event channels are renamed per game,
+ * so a date says which game the name is about.
+ */
+function nameDays(name, year) {
+    const days = [];
+    const add = (y, m, d) => { if (m >= 0 && m < 12 && d >= 1 && d <= 31) days.push(Math.floor(Date.UTC(y, m, d) / DAY)); };
+    for (const m of name.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) add(+m[1], m[2] - 1, +m[3]);
+    for (const m of name.matchAll(/\b(\d{2})-(\d{2})-(\d{4})\b/g)) add(+m[3], m[2] - 1, +m[1]);
+    for (const m of name.matchAll(/\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/gi)) add(year, MONTHS[m[2].toLowerCase()], +m[1]);
+    // not "Oct 02:00" (a time)
+    for (const m of name.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})\b(?!:)/gi)) add(year, MONTHS[m[1].toLowerCase()], +m[2]);
+    return days;
+}
+
+// Event channels that have finished ("End | ...")
+const ENDED_NAME = /^\s*(?:end|ended|finished)\s*[|:]/i;
+
+/**
+ * Guide titles that say only the league ("Live: MLB Baseball", "NFL Football",
+ * "Baseball: MLB"): the broadcaster's game slot, without the teams. Words
+ * allowed besides the league's own; the league token must be there.
+ */
+const GENERIC_COMMON = new Set(['live', 'en', 'vivo', 'directo', 'direto', 'direct', 'ao', 'the', 'on', 'night',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']);
+const GENERIC_LEAGUES = {
+    mlb: { tokens: ['mlb', 'major'], words: ['mlb', 'major', 'league', 'baseball', 'beisbol', 'bejzbol'] },
+    nfl: { tokens: ['nfl'], words: ['nfl', 'football', 'american', 'americano'] },
+    nba: { tokens: ['nba'], words: ['nba', 'basketball', 'baloncesto'] },
+    nhl: { tokens: ['nhl'], words: ['nhl', 'hockey', 'ice'] }
+};
+function genericForLeague(normTitle, leagueId) {
+    const spec = GENERIC_LEAGUES[leagueId];
+    if (!spec) return false;
+    const words = normTitle.trim().split(' ');
+    return words.some(w => spec.tokens.includes(w)) && words.every(w => GENERIC_COMMON.has(w) || spec.words.includes(w));
+}
+
 // "Live:", "LIVE ", "Uživo:", trailing "(Direto)" / "(L)" ...
 const LIVE_WORDS = 'live|en direct|en vivo|ao vivo|directo|direto|diretta|uzivo|na zywo|zivo|canli|live!';
 const LIVE_PREFIX = new RegExp(`^\\s*(?:${LIVE_WORDS})\\s*(?:[:\\-–|]\\s*|\\s+(?=\\S))`, 'i');
@@ -533,7 +586,7 @@ function loadProgrammes(from, to) {
     `).all(from, to).map(p => {
         let n = norms.get(p.title);
         if (n === undefined) norms.set(p.title, n = norm(p.title));
-        return { ...p, norm: n };
+        return { ...p, norm: n, match: squeeze(n) };
     });
 }
 
@@ -551,6 +604,8 @@ function lowerBound(programmes, t) {
 /**
  * EPG channel id -> live playlist channels on it (enabled sources, not hidden).
  * Same rule as POST /api/live/now: tvg id, else the EPG channel's name.
+ * Also: byWord, squeezed name word -> rows, for event channels named after
+ * the game ("NFL | TNF 8:15pm Buccaneers at Cowboys"), which have no guide.
  */
 function channelsByEpgId(enabledSourceIds) {
     const db = getDb();
@@ -570,13 +625,42 @@ function channelsByEpgId(enabledSourceIds) {
           AND p.is_hidden = 0 AND (c.is_hidden IS NULL OR c.is_hidden = 0)
           AND p.source_id IN (SELECT value FROM json_each(?))
     `).iterate(JSON.stringify(enabledSourceIds));
+    const byWord = new Map();
     for (const row of rows) {
+        row.match = squeeze(norm(row.name));
+        for (const w of new Set(row.match.trim().split(' '))) {
+            if (w.length < 4) continue;
+            if (!byWord.has(w)) byWord.set(w, []);
+            byWord.get(w).push(row);
+        }
         const epgId = (row.tvg_id && epgIds.get(String(row.tvg_id))) || (row.name && epgIds.get(row.name.toLowerCase()));
         if (!epgId) continue;
         if (!out.has(epgId)) out.set(epgId, []);
         out.get(epgId).push(row);
     }
+    out.byWord = byWord;
     return out;
+}
+
+/**
+ * Live channels named after the game. A dated name must be dated within a day
+ * of kick-off; an undated one only counts while the game is on or about to be
+ * (the provider renames these channels for each game).
+ */
+function channelsNamed(byWord, event, homeM, awayM, now) {
+    const candidates = new Set();
+    for (const v of homeM) {
+        const longest = v.split(' ').sort((a, b) => b.length - a.length)[0];
+        (byWord.get(longest) || []).forEach(r => candidates.add(r));
+    }
+    const year = new Date(event.start_time).getUTCFullYear();
+    const okDays = new Set([event.start_time - 12 * HOUR, event.start_time, event.start_time + 12 * HOUR].map(t => Math.floor(t / DAY)));
+    const soon = event.start_time - now < 18 * HOUR && now < event.end_time;
+    return [...candidates].filter(r => {
+        if (!namesBoth(r.match, homeM, awayM) || ENDED_NAME.test(r.name) || gameConflict(r.name, event.note)) return false;
+        const days = nameDays(r.name, year);
+        return days.length ? days.some(d => okDays.has(d)) : soon;
+    });
 }
 
 // ===================== Snapshot =====================
@@ -613,22 +697,37 @@ function buildSnapshot(enabledSourceIds) {
         // Programmes on air at kick-off that began at most 2h before it
         const t = row.start_time;
         const hits = [];
-        const homeV = data.home ? variants(data.home) : null;
-        const awayV = data.away ? variants(data.away) : null;
+        const generic = []; // "Live: MLB Baseball" at kick-off: probably this game
+        const homeM = data.home ? variants(data.home).map(squeeze) : null;
+        const awayM = data.away ? variants(data.away).map(squeeze) : null;
         const keywords = (league.keywords || []).map(k => norm(k));
+        // Generic titles only say "a game of this league": trusted when it is the only one then
+        const alone = homeM && GENERIC_LEAGUES[league.id] && !stored.some(o => o !== row && o.league === row.league
+            && o.state !== 'post' && Math.abs(o.start_time - t) <= 45 * 60000);
         // A placeholder time says nothing about when it airs
         for (let i = data.timeTbd ? programmes.length : lowerBound(programmes, t - 2 * HOUR); i < programmes.length; i++) {
             const p = programmes[i];
             if (p.start_time > t + 30 * 60000) break;
             if (p.end_time <= t + 15 * 60000) continue;
-            const match = homeV
-                ? namesBoth(p.norm, homeV, awayV)
-                : keywords.some(k => p.norm.includes(k)) && p.start_time >= t - 45 * 60000;
-            if (match) hits.push(p);
+            if (homeM) {
+                if (namesBoth(p.match, homeM, awayM)) {
+                    if (!gameConflict(p.title, data.note)) hits.push(p);
+                } else if (alone && Math.abs(p.start_time - t) <= 20 * 60000 && p.end_time - t >= HOUR
+                    && genericForLeague(p.norm, league.id)) {
+                    generic.push(p);
+                }
+            } else if (keywords.some(k => p.norm.includes(k)) && p.start_time >= t - 45 * 60000) {
+                hits.push(p);
+            }
         }
         // Kept without channels too: a followed team's game shows before the guide lists it
         const epgIds = onChannels(hits);
+        const genericIds = onChannels(generic).filter(id => !epgIds.includes(id));
+        const named = homeM && !data.timeTbd ? channelsNamed(channels.byWord, { ...row, note: data.note }, homeM, awayM, now) : [];
         hits.forEach(p => claimed.add(p));
+        generic.forEach(p => claimed.add(p));
+        // The programme that best describes it: the one starting closest to kick-off
+        const label = [...hits].sort((a, b) => Math.abs(a.start_time - t) - Math.abs(b.start_time - t))[0];
         events.push({
             id: row.id,
             league: league.id,
@@ -645,7 +744,9 @@ function buildSnapshot(enabledSourceIds) {
             timeTbd: !!data.timeTbd,
             guideOnly: false,
             epgIds,
-            programme: hits[0]?.title || ''
+            namedRows: named,
+            genericIds,
+            programme: label?.title || ''
         });
     }
 
@@ -681,6 +782,8 @@ function buildSnapshot(enabledSourceIds) {
             away: null,
             guideOnly: true,
             epgIds: onChannels(g.programmes),
+            namedRows: [],
+            genericIds: [],
             programme: g.programmes[0].title
         });
     }
@@ -744,15 +847,23 @@ function forUser(profile, { sourceIds, lang = '', hard = false, limit = 30, mine
     const picked = [];
     for (const e of events) {
         const seen = new Set();
-        let rows = e.epgIds.flatMap(id => channels.get(id) || []).filter(r => {
+        const unique = list => list.filter(r => {
             const key = `${r.source_id}:${r.item_id}`;
             return !seen.has(key) && seen.add(key);
         });
-        if (hard) rows = rows.filter(r => languages.visible(r.name, r.group_name, lang));
-        if (lang) {
-            rows = [...rows.filter(r => languages.matches(r.name, r.group_name, lang)),
-                ...rows.filter(r => !languages.matches(r.name, r.group_name, lang))];
-        }
+        // Most certain first: guide programmes naming both teams, channels named
+        // after the game, then the league's generic game slot at kick-off
+        const tiers = [
+            unique(e.epgIds.flatMap(id => channels.get(id) || [])),
+            unique(e.namedRows),
+            unique(e.genericIds.flatMap(id => channels.get(id) || []))
+        ].map(tier => {
+            if (hard) tier = tier.filter(r => languages.visible(r.name, r.group_name, lang));
+            if (!lang) return tier;
+            return [...tier.filter(r => languages.matches(r.name, r.group_name, lang)),
+                ...tier.filter(r => !languages.matches(r.name, r.group_name, lang))];
+        });
+        const rows = tiers.flat();
 
         const favourite = e.guideOnly
             ? teamVariants.some(v => spans(norm(e.title), v).length > 0)
@@ -813,5 +924,5 @@ function profileChanged() {
 module.exports = {
     LEAGUES, start, refresh, profileChanged, teams, teamsByKey, forUser,
     // for tests
-    _internal: { norm, variants, namesBoth, guideFixture, leaguesFor }
+    _internal: { norm, variants, namesBoth, guideFixture, leaguesFor, squeeze, gameConflict, nameDays, genericForLeague }
 };

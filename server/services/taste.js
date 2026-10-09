@@ -25,6 +25,8 @@ const tmdbDiscover = require('./tmdbDiscover');
 const tmdbTrending = require('./tmdbTrending');
 const languages = require('./languages');
 const liveEvents = require('./liveEvents');
+const recommend = require('./recommend');
+const maturity = require('./maturity');
 
 const CATALOG = {
     genres: [
@@ -338,16 +340,22 @@ function interleave(lists) {
 }
 
 /**
- * Build the user's rows: "Top picks" (this week's trending in their genres),
- * then genres and motifs alternating. A title appears in one row only.
- * Returns { rows: [{ id, title, items }], pending }.
+ * Build the user's rows: from their watch history first (services/recommend.js:
+ * "Top picks", "Because you watched X"), then the quiz rows - "Popular in your
+ * genres" (this week's trending), then genres and motifs alternating. A title
+ * appears in one row only; "Not for me" titles in none; maturity rules
+ * (services/maturity.js, TMDB data only) apply to every row.
+ * Returns { profile, rows: [{ id, title, items }], pending }.
  */
 async function forYou(user, { settings, sourceIds }) {
     const profile = getProfile(user.id);
-    if (!profile) return { profile: null, rows: [], pending: false };
-
     const lang = settings.languagePriority || '';
     const hard = !!(settings.languageHardFilter && lang);
+
+    const seen = new Set();
+    const rows = historyRows(user, profile, sourceIds, { lang, hard }, seen);
+    if (!profile) return { profile: null, rows, pending: false };
+
     const kinds = kindsOf(profile);
 
     // Plan every row first, so the library is scanned once per kind
@@ -394,13 +402,13 @@ async function forYou(user, { settings, sourceIds }) {
     }
 
     const watched = finishedItems(user.id);
-    const seen = new Set();
+    const ok = maturityGate(user, profile, kinds.flatMap(kind => [...library[kind].keys()].map(id => `${kind}:${id}`)));
     const take = (kind, ids, filter = () => true) => {
         const out = [];
         for (const id of ids) {
             if (out.length >= ROW_SIZE) break;
             const item = library[kind].get(id);
-            if (!item || !filter(item)) continue;
+            if (!item || !filter(item) || !ok(kind, id)) continue;
             const key = `${item.type}:${item.source_id}:${item.item_id}`;
             if (seen.has(key) || watched.has(`${item.source_id}:${item.item_id}`)) continue;
             seen.add(key);
@@ -409,12 +417,13 @@ async function forYou(user, { settings, sourceIds }) {
         return out;
     };
 
-    const rows = [];
     const sharesGenre = item => !wantedNames.length ||
         item.genres.toLowerCase().split(/\s*,\s*/).some(g => wantedNames.some(w => g.includes(w)));
     const top = interleave(kinds.map(kind => take(kind, topIds[kind], sharesGenre))).slice(0, ROW_SIZE);
     if (top.length >= 4) {
-        rows.push({ id: 'top-picks', title: `Top picks for ${user.username || 'you'}`, items: top });
+        // With history rows above, the history's own "Top picks" leads
+        const title = rows.length ? 'Popular this week in your genres' : `Top picks for ${user.username || 'you'}`;
+        rows.push({ id: 'top-picks', title, items: top });
     }
     for (const plan of plans) {
         const items = interleave(kinds.map(kind => take(kind, plan.perKind[kind]))).slice(0, ROW_SIZE);
@@ -422,6 +431,66 @@ async function forYou(user, { settings, sourceIds }) {
     }
 
     return { profile, rows, pending: pending || tmdbDiscover.busy() };
+}
+
+/**
+ * (kind, id) -> may this row show it? "Not for me" never; a kids account only
+ * known levels up to its limit; everyone else no kids titles (level <= 1)
+ * unless they picked Family & Kids. Levels come from TMDB data only.
+ */
+function maturityGate(user, profile, keys) {
+    const levels = maturity.levels(keys);
+    // "Not for me", and anything already watched (series too, not just movies)
+    const hidden = new Set([...recommend.notForMe(user.id), ...recommend.watchedKeys(user.id)]);
+    const limit = maturity.limitFor(user);
+    const kidsOk = (profile?.genres || []).includes('family');
+    return (kind, id) => {
+        const key = `${kind}:${id}`;
+        if (hidden.has(key)) return false;
+        const level = levels.has(key) ? levels.get(key) : null;
+        if (limit !== null) return level !== null && level <= limit;
+        return kidsOk || level === null || level > 1;
+    };
+}
+
+/** Rows from watch history (services/recommend.js) as library items */
+function historyRows(user, profile, sourceIds, { lang, hard }, seen) {
+    let computed;
+    try {
+        computed = recommend.rowsFor(user, { quiz: profile, catalog: CATALOG });
+    } catch (err) {
+        console.error('[ForYou] Recommendations failed:', err);
+        return [];
+    }
+    if (!computed.length) return [];
+
+    // One library lookup per kind for every pick
+    const library = {};
+    for (const kind of ['movie', 'tv']) {
+        const ids = computed.flatMap(r => r.picks.filter(p => p.kind === kind).map(p => p.id));
+        library[kind] = matchLibrary(kind, ids, sourceIds, { lang, hard });
+    }
+    const titleOf = getDb().prepare('SELECT title FROM tmdb_meta WHERE kind = ? AND tmdb_id = ?');
+
+    const out = [];
+    for (const row of computed) {
+        const items = [];
+        for (const p of row.picks) {
+            if (items.length >= ROW_SIZE) break;
+            const item = library[p.kind].get(p.id);
+            if (!item) continue;
+            const key = `${item.type}:${item.source_id}:${item.item_id}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            items.push(item);
+        }
+        if (items.length < 4) continue;
+        const title = row.because
+            ? `Because you watched ${titleOf.get(row.because.kind, row.because.id)?.title || 'this'}`
+            : `Top picks for ${user.username || 'you'}`;
+        out.push({ id: row.id, title, items });
+    }
+    return out;
 }
 
 /** "source:item" of movies this user finished, so they aren't recommended */
@@ -437,7 +506,8 @@ function finishedItems(userId) {
 async function forYouCached(user, ctx) {
     const profile = getProfile(user.id);
     const key = JSON.stringify([profile?.updatedAt, ctx.settings.languagePriority, ctx.settings.languageHardFilter,
-        tmdbTrending.fetchedAt('movie'), tmdbTrending.fetchedAt('tv')]);
+        tmdbTrending.fetchedAt('movie'), tmdbTrending.fetchedAt('tv'), recommend.stamp(user.id),
+        !!user.kids, user.maxMaturity || null]);
     const cached = forYouCache.get(user.id);
     if (cached && cached.key === key && Date.now() - cached.at < 30 * 60 * 1000) return cached.result;
 
