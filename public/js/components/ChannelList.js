@@ -8,6 +8,7 @@ class ChannelList {
         this.container = document.getElementById('channel-list');
         this.searchInput = document.getElementById('channel-search');
         this.sourceSelect = document.getElementById('source-select');
+        this.regionSelect = document.getElementById('region-select');
         this.showHiddenCheckbox = document.getElementById('show-hidden');
         this.toggleGroupsBtn = document.getElementById('toggle-groups');
         this.contextMenu = document.getElementById('context-menu');
@@ -162,6 +163,16 @@ class ChannelList {
 
         // Source filter handler
         this.sourceSelect.addEventListener('change', () => this.loadChannels());
+
+        // Regional TV: remember the pick on this device, list that country's channels
+        if (this.regionSelect) {
+            this.loadRegions();
+            this.regionSelect.addEventListener('change', () => {
+                try { localStorage.setItem('fleurbox_live_region', this.regionSelect.value); } catch { /* private mode */ }
+                this.searchResults = null;
+                this.render();
+            });
+        }
 
         // Show hidden toggle (hidden channels are filtered server-side, so refetch)
         if (this.showHiddenCheckbox) {
@@ -354,23 +365,46 @@ class ChannelList {
      */
     render() {
         const searchTerm = this.searchInput.value.trim();
-        if (searchTerm && this.searchResults?.term !== searchTerm) {
-            this.runSearch(searchTerm);
+        const region = this.regionSelect?.value || '';
+        // A region lists its channels like a search does (the term narrows it)
+        const key = `${region}|${searchTerm}`;
+        if ((searchTerm || region) && this.searchResults?.term !== key) {
+            this.runSearch(searchTerm, region);
             return;
         }
-        if (!searchTerm) {
+        if (!searchTerm && !region) {
             this.searchResults = null;
             this._searchToken = (this._searchToken || 0) + 1; // drop any search in flight
         }
         this.renderGroups();
     }
 
-    async runSearch(term) {
+    /** Fill the region picker with the countries that have channels */
+    async loadRegions() {
+        let saved = '';
+        try { saved = localStorage.getItem('fleurbox_live_region') || ''; } catch { /* private mode */ }
+        try {
+            const regions = await API.request('GET', '/live/regions');
+            this.regionSelect.innerHTML = '<option value="">All regions</option>' + regions.map(r =>
+                `<option value="${this.escapeHtml(r.id)}">${this.escapeHtml(r.label)} (${r.count})</option>`).join('');
+            if (saved && regions.some(r => r.id === saved)) {
+                this.regionSelect.value = saved;
+                this.searchResults = null;
+                if (this.loaded) this.render();
+            }
+        } catch (err) {
+            console.warn('[ChannelList] Regions unavailable:', err);
+            this.regionSelect.classList.add('hidden');
+        }
+    }
+
+    async runSearch(term, region = '') {
         const token = this._searchToken = (this._searchToken || 0) + 1;
         this.container.innerHTML = '<div class="loading"></div>';
         try {
             const hasLanguage = typeof LanguagePriority !== 'undefined';
             const result = await API.live.search(term, {
+                ...(region ? { region, limit: 2000 } : {}),
                 source: this.sourceSelect.value,
                 includeHidden: this.includeHidden() ? 1 : '',
                 // Settings > "Hide titles in other languages" applies to Live TV search
@@ -378,11 +412,11 @@ class ChannelList {
                 hard: hasLanguage && LanguagePriority.hardFilter(window.app) ? 1 : ''
             });
             if (token !== this._searchToken) return; // a newer search (or none) since
-            this.searchResults = { term, channels: this.rememberChannels(result.channels), truncated: result.truncated };
+            this.searchResults = { term: `${region}|${term}`, channels: this.rememberChannels(result.channels), truncated: result.truncated };
         } catch (err) {
             if (token !== this._searchToken) return;
             console.error('Channel search failed:', err);
-            this.searchResults = { term, channels: [], truncated: false };
+            this.searchResults = { term: `${region}|${term}`, channels: [], truncated: false };
         }
         this.renderGroups();
     }
@@ -506,7 +540,8 @@ class ChannelList {
             const kids = !!window.app?.currentUser?.kids;
             this.container.innerHTML = `
         <div class="empty-state">
-          <p>${searching ? 'No channels match your search' : kids ? 'No channels yet' : 'No channels loaded'}</p>
+          <p>${searching ? (this.searchInput.value.trim() ? 'No channels match your search' : 'No channels in this region')
+              : kids ? 'No channels yet' : 'No channels loaded'}</p>
           <p class="hint">${searching ? 'Try a different search term'
               : kids ? 'Ask a parent to choose channels for this profile.' : 'Add a source in Settings to get started'}</p>
         </div>

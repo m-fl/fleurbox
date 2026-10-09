@@ -20,6 +20,7 @@ const liveEvents = require('../services/liveEvents');
 const taste = require('../services/taste');
 const streamRef = require('../services/streamRef');
 const maturity = require('../services/maturity');
+const regions = require('../services/regions');
 
 const UNCATEGORIZED = 'Uncategorized';
 
@@ -130,14 +131,30 @@ router.get('/channels', async (req, res) => {
 });
 
 /**
- * GET /api/live/search?q=&source=&includeHidden=1&lang=&hard=1&limit=
- * Channels whose name or group contains q (case-insensitive), capped at
+ * GET /api/live/regions - countries with channels (Regional TV, services/regions.js):
+ * [{ id, label, count }]
+ */
+router.get('/regions', async (req, res) => {
+    try {
+        res.json(regions.list([...(await liveSources()).keys()]));
+    } catch (err) {
+        console.error('[Live] Regions failed:', err);
+        res.status(500).json({ error: 'Failed to load regions' });
+    }
+});
+
+/**
+ * GET /api/live/search?q=&region=&source=&includeHidden=1&lang=&hard=1&limit=
+ * Channels whose name or group contains q (case-insensitive) - and/or, with
+ * `region`, that country's channels (services/regions.js) - capped at
  * `limit` (default 500, max 2000). Returns { channels, truncated }.
  */
 router.get('/search', async (req, res) => {
     try {
         const q = String(req.query.q || '').trim().toLowerCase();
-        if (!q) return res.json({ channels: [], truncated: false });
+        const region = req.query.region ? regions.sqlFor(String(req.query.region)) : null;
+        if (req.query.region && !region) return res.status(400).json({ error: 'Unknown region' });
+        if (!q && !region) return res.json({ channels: [], truncated: false });
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 500, 1), 2000);
         const sourceTypes = await liveSources(req.query.source);
 
@@ -153,12 +170,13 @@ router.get('/search', async (req, res) => {
             ${CATEGORY_JOIN}
             WHERE p.type = 'live'
               AND p.source_id IN (SELECT value FROM json_each(@sources))
-              AND (instr(lower(p.name), @q) > 0 OR instr(lower(IFNULL(c.name, '${UNCATEGORIZED}')), @q) > 0)
+              AND (@q = '' OR instr(lower(p.name), @q) > 0 OR instr(lower(IFNULL(c.name, '${UNCATEGORIZED}')), @q) > 0)
+              ${region ? `AND ${region.sql}` : ''}
               ${hiddenClause(req.query.includeHidden === '1')}
               ${languageClause}
             ORDER BY p.rowid
             LIMIT @limit
-        `).all({ sources: JSON.stringify([...sourceTypes.keys()]), q, lang, limit: limit + 1 });
+        `).all({ sources: JSON.stringify([...sourceTypes.keys()]), q, lang, limit: limit + 1, ...(region ? region.params : {}) });
 
         res.json({
             channels: maturity.filterChannels(req.user, rows.slice(0, limit)).map(r => toChannel(r, sourceTypes)),

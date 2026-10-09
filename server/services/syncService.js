@@ -104,6 +104,7 @@ class SyncService {
             require('./searchIndex').rebuild('playlist-sync');
             require('./tmdbSync').afterPlaylistSync();
             require('./recommend').afterPlaylistSync();
+            require('./regions').invalidate();
         } catch (err) {
             console.error('[Sync] Global sync failed:', err);
         }
