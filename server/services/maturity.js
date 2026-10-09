@@ -7,6 +7,11 @@
  *
  * Source, in order: the stored age rating (tmdb_meta.certification, US else
  * GB/NL); without one, TMDB's own "Kids" TV genre (1) or adult keywords (4).
+ * Animated titles TMDB tags as made for children ("kids", "children's
+ * adventure", "based on toy"...) count as kids (1) even when rated PG - PAW
+ * Patrol films are PG, Zootopia (no such keywords) stays family. And an
+ * unrated animated film of a TMDB "Kids" series' franchise counts as kids
+ * (backfill).
  *
  * Kids accounts (user.kids, user.maxMaturity) only see titles with a known
  * level at or below their maximum.
@@ -27,6 +32,10 @@ const RATINGS = {
 const ADULT_KEYWORDS = new Set(['adult animation', 'erotic', 'erotica', 'softcore', 'sex scene', 'nudity',
     'explicit sex', 'gore', 'splatter', 'torture', 'extreme violence', 'pornography']);
 
+// Keywords TMDB puts on titles made for children (not just suitable for them)
+const KIDS_KEYWORDS = new Set(['kids', 'children', "children's adventure", "children's cartoon", "children's film",
+    "children's series", 'preschool', 'pre-school', 'toddler', 'nursery rhyme', 'based on toy', 'educational']);
+
 const LEVELS = [
     { id: 1, label: 'Young kids (TV-Y, TV-Y7, G)' },
     { id: 2, label: 'Kids (up to PG, TV-PG)' },
@@ -37,10 +46,13 @@ const DEFAULT_KIDS_LEVEL = 2;
 /** Level from a stored record ({ certification, genres, keywords }), or null */
 function levelOf({ certification, genres, keywords }) {
     const rated = RATINGS[String(certification || '').trim()];
-    if (rated !== undefined) return rated;
     const words = String(keywords || '').toLowerCase().split(/\s*,\s*/);
+    const genreList = String(genres || '').split(/\s*,\s*/);
+    // Made for children: animated + TMDB's children keywords, up to a PG rating
+    const forKids = genreList.includes('Animation') && words.some(k => KIDS_KEYWORDS.has(k));
+    if (rated !== undefined) return forKids && rated === 2 ? 1 : rated;
     if (words.some(k => ADULT_KEYWORDS.has(k))) return 4;
-    if (String(genres || '').split(/\s*,\s*/).includes('Kids')) return 1;
+    if (genreList.includes('Kids') || forKids) return 1;
     return null;
 }
 
@@ -86,22 +98,34 @@ function levels(keys) {
     return out;
 }
 
-/** Fill tmdb_meta.maturity for records fetched before it existed */
+/**
+ * (Re)compute tmdb_meta.maturity from the stored data (the rules above may
+ * change; the TMDB data doesn't need re-fetching). Then: unrated animated
+ * films of a TMDB "Kids" series' franchise (same first two title words, e.g.
+ * "PAW Patrol: Air Rescue" -> "PAW Patrol") count as kids too.
+ * Returns how many levels changed.
+ */
 function backfill() {
     const db = getDb();
     const rows = db.prepare(`
-        SELECT kind, tmdb_id, certification, genres, keywords FROM tmdb_meta
-        WHERE status = 'ok' AND extras_at IS NOT NULL AND maturity IS NULL
+        SELECT kind, tmdb_id, title, certification, genres, keywords, maturity FROM tmdb_meta
+        WHERE status = 'ok' AND extras_at IS NOT NULL
     `).all();
     const update = db.prepare('UPDATE tmdb_meta SET maturity = ? WHERE kind = ? AND tmdb_id = ?');
-    let set = 0;
+    const franchise = t => String(t || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim().split(/\s+/).slice(0, 2).join(' ');
+    const kidsSeries = new Set(rows
+        .filter(r => r.kind === 'tv' && String(r.genres || '').split(/\s*,\s*/).includes('Kids'))
+        .map(r => franchise(r.title)).filter(f => f.includes(' ')));
+    let changed = 0;
     db.transaction(() => {
         for (const r of rows) {
-            const level = levelOf(r);
-            if (level !== null) { update.run(level, r.kind, r.tmdb_id); set++; }
+            let level = levelOf(r);
+            if (level === null && r.kind === 'movie' && String(r.genres || '').includes('Animation')
+                && kidsSeries.has(franchise(r.title))) level = 1;
+            if (level !== r.maturity) { update.run(level, r.kind, r.tmdb_id); changed++; }
         }
     })();
-    return set;
+    return changed;
 }
 
 module.exports = { LEVELS, DEFAULT_KIDS_LEVEL, levelOf, limitFor, allowedSql, sqlFilter, levels, backfill };
