@@ -48,9 +48,10 @@ class ProfilePage {
         if (!page) return;
         if (!this.profile) page.innerHTML = '<div class="loading-state">Loading profile...</div>';
         try {
-            [this.profile, this.taste] = await Promise.all([
+            [this.profile, this.taste, this.notForMe] = await Promise.all([
                 API.request('GET', '/profile'),
-                API.request('GET', '/home/taste')
+                API.request('GET', '/home/taste'),
+                API.request('GET', '/home/feedback').catch(() => [])
             ]);
         } catch (err) {
             console.error('[Profile] Load failed:', err);
@@ -95,6 +96,16 @@ class ProfilePage {
                 <section class="profile-card">
                     <div class="profile-card-head">
                         <div>
+                            <h3>Not for me</h3>
+                            <p class="hint">Titles you hid from your recommendations. Undo one to see it (and similar titles) again.</p>
+                        </div>
+                    </div>
+                    ${this.notForMeList()}
+                </section>
+
+                <section class="profile-card">
+                    <div class="profile-card-head">
+                        <div>
                             <h3>Appearance</h3>
                             <p class="hint">Saved to your account, so it follows you to other devices.</p>
                         </div>
@@ -111,6 +122,40 @@ class ProfilePage {
         page.querySelectorAll('.profile-option').forEach(btn => {
             btn.addEventListener('click', () => this.setPreference(btn.dataset.key, btn.dataset.id));
         });
+        page.querySelectorAll('[data-undo]').forEach(btn => {
+            btn.addEventListener('click', () => this.undoNotForMe(this.notForMe[btn.dataset.undo]));
+        });
+    }
+
+    /** The "Not for me" titles, each with Undo */
+    notForMeList() {
+        const items = this.notForMe || [];
+        if (!items.length) {
+            return '<p class="profile-empty">Nothing hidden. Use "Not for me" on a movie or series to hide it.</p>';
+        }
+        const esc = ProfilePage.escape;
+        return `<div class="profile-hidden-list">${items.map((t, i) => `
+            <div class="profile-hidden-item">
+                <img src="${esc(t.poster ? API.imageUrl(t.poster) : '/img/poster-placeholder.jpg')}" alt="" loading="lazy" data-fallback="/img/poster-placeholder.jpg">
+                <div class="profile-hidden-text">
+                    <span class="profile-hidden-title">${esc(t.title)}</span>
+                    <span class="hint">${t.kind === 'tv' ? 'Series' : 'Movie'}${t.year ? ` · ${esc(t.year)}` : ''}</span>
+                </div>
+                <button class="btn btn-ghost btn-sm" data-undo="${i}">Undo</button>
+            </div>`).join('')}</div>`;
+    }
+
+    async undoNotForMe(title) {
+        if (!title) return;
+        try {
+            await API.request('POST', '/home/feedback', { kind: title.kind, tmdbId: title.tmdbId, value: 0 });
+        } catch (err) {
+            console.error('[Profile] Undo failed:', err);
+            return;
+        }
+        this.notForMe = this.notForMe.filter(t => t !== title);
+        if (this.app?.pages?.home) this.app.pages.home.forYouSignature = null;
+        this.render();
     }
 
     /** The quiz answers as labelled chip groups */

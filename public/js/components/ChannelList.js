@@ -502,10 +502,13 @@ class ChannelList {
 
         // Empty State
         if (this.sortedGroups.length === 0) {
+            // A kids account sees only channels a parent enabled for it
+            const kids = !!window.app?.currentUser?.kids;
             this.container.innerHTML = `
         <div class="empty-state">
-          <p>${searching ? 'No channels match your search' : 'No channels loaded'}</p>
-          <p class="hint">${searching ? 'Try a different search term' : 'Add a source in Settings to get started'}</p>
+          <p>${searching ? 'No channels match your search' : kids ? 'No channels yet' : 'No channels loaded'}</p>
+          <p class="hint">${searching ? 'Try a different search term'
+              : kids ? 'Ask a parent to choose channels for this profile.' : 'Add a source in Settings to get started'}</p>
         </div>
       `;
             return;

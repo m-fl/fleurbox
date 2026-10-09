@@ -7913,3 +7913,38 @@ kbd {
 .rail-channel.is-missing .rail-now {
   font-style: italic;
 }
+
+/* Profile: "Not for me" titles */
+.profile-hidden-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.profile-hidden-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.profile-hidden-item img {
+  width: 36px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: var(--color-bg-tertiary);
+}
+
+.profile-hidden-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.profile-hidden-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

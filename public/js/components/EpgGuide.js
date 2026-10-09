@@ -395,10 +395,11 @@ class EpgGuide {
 
 
         if (playableChannels.length === 0) {
+            const kids = !!window.app?.currentUser?.kids;
             this.container.innerHTML = `
                 <div class="empty-state">
-                    <p>No visible channels available</p>
-                    <p class="hint">Check your content settings or add a source</p>
+                    <p>${kids ? 'No channels yet' : 'No visible channels available'}</p>
+                    <p class="hint">${kids ? 'Ask a parent to choose channels for this profile.' : 'Check your content settings or add a source'}</p>
                 </div>
             `;
             return;

@@ -335,6 +335,16 @@ router.get('/sports/teams', async (req, res) => {
     }
 });
 
+/** GET /api/home/feedback - the user's "Not for me" titles, newest first (Profile page) */
+router.get('/feedback', (req, res) => {
+    try {
+        res.json(recommend.notForMeList(req.user.id));
+    } catch (err) {
+        console.error('[Home] Feedback list failed:', err);
+        res.status(500).json({ error: 'Failed to load' });
+    }
+});
+
 /**
  * POST /api/home/feedback { kind: 'movie'|'tv', tmdbId, value: -1|0 }
  * "Not for me" (-1): never recommended again, and counts against similar

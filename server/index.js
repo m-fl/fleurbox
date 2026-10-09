@@ -334,11 +334,16 @@ app.listen(PORT, async () => {
         console.error('Plugin initialization failed:', err);
     });
 
-    // Trigger background sync with delay to allow server to settle
+    // Trigger background sync with delay to allow server to settle.
+    // NO_AUTO_SYNC=1 (test instances on a copy of the data): no provider sync
     setTimeout(async () => {
-        await syncService.syncAll().catch(console.error);
-        // Start the server-side sync timer after initial sync
-        await syncService.startSyncTimer().catch(console.error);
+        if (process.env.NO_AUTO_SYNC === '1') {
+            console.log('[Sync] NO_AUTO_SYNC=1 - provider sync disabled');
+        } else {
+            await syncService.syncAll().catch(console.error);
+            // Start the server-side sync timer after initial sync
+            await syncService.startSyncTimer().catch(console.error);
+        }
 
         // Detect hardware acceleration capabilities
         try {

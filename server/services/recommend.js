@@ -399,6 +399,28 @@ function watchedKeys(userId) {
         .map(r => keyOf(r.kind, r.tmdb_id)));
 }
 
+/**
+ * Titles a user marked "Not for me", newest first, for the Profile page:
+ * [{ kind, tmdbId, title, year, poster, markedAt }]
+ */
+function notForMeList(userId) {
+    ensureTables();
+    return getDb().prepare(`
+        SELECT u.kind, u.tmdb_id, u.feedback_at, m.title, substr(m.release_date, 1, 4) AS year,
+               (SELECT p.stream_icon FROM media_links l
+                  JOIN playlist_items p ON p.source_id = l.source_id AND p.type = l.item_type AND p.item_id = l.item_id
+                  WHERE l.kind = u.kind AND l.tmdb_id = u.tmdb_id AND l.match IN ('tmdb', 'manual') AND p.stream_icon <> ''
+                  LIMIT 1) AS poster
+        FROM user_media u
+        LEFT JOIN tmdb_meta m ON m.kind = u.kind AND m.tmdb_id = u.tmdb_id
+        WHERE u.user_id = ? AND u.feedback = -1
+        ORDER BY u.feedback_at DESC
+    `).all(userId).map(r => ({
+        kind: r.kind, tmdbId: r.tmdb_id, title: r.title || `TMDB ${r.tmdb_id}`, year: r.year || '',
+        poster: r.poster || null, markedAt: r.feedback_at
+    }));
+}
+
 /** Keys ('kind:id') a user marked "Not for me" */
 function notForMe(userId) {
     ensureTables();
@@ -426,4 +448,4 @@ function afterTmdbSync() {
     cache.clear();
 }
 
-module.exports = { start, afterPlaylistSync, afterTmdbSync, rowsFor, setFeedback, getFeedback, notForMe, watchedKeys, invalidate, stamp, ensureTables };
+module.exports = { start, afterPlaylistSync, afterTmdbSync, rowsFor, setFeedback, getFeedback, notForMe, notForMeList, watchedKeys, invalidate, stamp, ensureTables };
