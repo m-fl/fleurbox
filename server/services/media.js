@@ -29,6 +29,19 @@
  */
 const { getDb } = require('../db/sqlite');
 
+// Links that mean "this copy IS that title": the provider's own TMDB id, or
+// confirmed in review. Unconfirmed name + year matches stay separate titles.
+const TRUSTED = `('tmdb', 'manual')`;
+
+/**
+ * SQL join from a playlist row (alias `p`) to its trusted link (alias `ml`:
+ * ml.media_id, ml.kind, ml.tmdb_id). LEFT by default; inner with left=false.
+ */
+function linkJoin(p = 'p', ml = 'ml', left = true) {
+    return `${left ? 'LEFT ' : ''}JOIN media_links ${ml} ON ${ml}.source_id = ${p}.source_id
+        AND ${ml}.item_type = ${p}.type AND ${ml}.item_id = ${p}.item_id AND ${ml}.match IN ${TRUSTED}`;
+}
+
 const YEAR_SLACK = 1; // providers and TMDB disagree on release years by one
 // "(20/12/2024)", "10.02.2024": a dated episode or replay, never one title
 const DATED = /\b\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})\b/;
@@ -86,6 +99,9 @@ function ensureTables() {
             PRIMARY KEY (source_id, item_type, item_id)
         );
         CREATE INDEX IF NOT EXISTS idx_media_links_media ON media_links(media_id);
+        -- media_links -> playlist row lookups (otherwise a scan of the source's
+        -- whole type per link)
+        CREATE INDEX IF NOT EXISTS idx_items_link ON playlist_items(source_id, type, item_id);
         CREATE INDEX IF NOT EXISTS idx_media_links_tmdb ON media_links(kind, tmdb_id);
     `);
     tablesReady = true;
@@ -355,4 +371,4 @@ function review(copies, action) {
     return done;
 }
 
-module.exports = { ensureTables, rebuild, forCopy, setOverride, cleanName, nameYear, reviewList, review };
+module.exports = { ensureTables, rebuild, forCopy, setOverride, cleanName, nameYear, reviewList, review, linkJoin, TRUSTED };

@@ -199,15 +199,17 @@ router.get('/trending', async (req, res) => {
         const rows = getDb().prepare(`
             SELECT p.source_id, p.item_id, p.name, p.stream_icon, p.rating, p.year, p.category_id,
                    p.container_extension, p.type, p.data, c.name AS category,
-                   CAST(json_extract(p.data, '$.tmdb') AS TEXT) AS tmdb_id
+                   ml.tmdb_id AS tmdb_id
             FROM playlist_items p
             LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id
+            ${require('../services/media').linkJoin('p', 'ml', false)}
             WHERE ${typeClause}
+              AND ml.kind = @kind
               AND p.is_hidden = 0 AND (c.is_hidden IS NULL OR c.is_hidden = 0)
               AND p.source_id IN (SELECT value FROM json_each(@sources))
-              AND CAST(json_extract(p.data, '$.tmdb') AS TEXT) IN (SELECT value FROM json_each(@ids))
+              AND ml.tmdb_id IN (SELECT value FROM json_each(@ids))
             ORDER BY p.rowid
-        `).all({ sources: JSON.stringify(sourceIds), ids: JSON.stringify(ids) });
+        `).all({ kind, sources: JSON.stringify(sourceIds), ids: JSON.stringify(ids) });
 
         // Best copy per title: the priority language if there is one
         const best = new Map();

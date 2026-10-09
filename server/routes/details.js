@@ -3,12 +3,10 @@ const router = express.Router();
 const { getDb } = require('../db/sqlite');
 const { settings: settingsDb } = require('../db');
 const languages = require('../services/languages');
+const media = require('../services/media');
 const maturity = require('../services/maturity');
 const recommend = require('../services/recommend');
 
-// Movie vs tv comes from the category: the provider files ~10k series under
-// type 'movie' (see searchIndex.js)
-const TMDB_KIND = `CASE WHEN p.type = 'series' OR c.type = 'series' THEN 'tv' ELSE 'movie' END`;
 const CATEGORY_JOIN = `LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id`;
 
 /**
@@ -31,16 +29,16 @@ router.get('/', (req, res) => {
             return res.status(400).json({ error: 'type (movie|series), sourceId and itemId are required' });
         }
 
-        require('../services/tmdbSync').ensureTables();
-        // Movie vs tv comes from the category: the provider files ~10k series
-        // under type 'movie' (see searchIndex.js)
+        media.ensureTables();
+        // The copy's title through its media link (services/media.js): the
+        // provider's TMDB id or a confirmed match; an unconfirmed name match
+        // shows the provider's own data, as a separate title
         const row = getDb().prepare(`
             SELECT p.data, c.name AS category_name, m.*
             FROM playlist_items p
             LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id
-            LEFT JOIN tmdb_meta m ON m.status = 'ok'
-                AND m.kind = CASE WHEN p.type = 'series' OR c.type = 'series' THEN 'tv' ELSE 'movie' END
-                AND m.tmdb_id = CAST(json_extract(p.data, '$.tmdb') AS TEXT)
+            ${media.linkJoin()}
+            LEFT JOIN tmdb_meta m ON m.status = 'ok' AND m.kind = ml.kind AND m.tmdb_id = ml.tmdb_id
             WHERE p.source_id = ? AND p.item_id = ?
             ORDER BY (p.type = ?) DESC
             LIMIT 1
@@ -83,8 +81,8 @@ router.get('/', (req, res) => {
             };
 
         // The TMDB title this copy belongs to, and the user's "Not for me" on it
-        const media = tmdb ? { kind: row.kind, tmdbId: row.tmdb_id, feedback: recommend.getFeedback(req.user.id, row.kind, row.tmdb_id) } : null;
-        res.json({ found: true, tmdb, category: row.category_name || '', info, media });
+        const title = tmdb ? { kind: row.kind, tmdbId: row.tmdb_id, feedback: recommend.getFeedback(req.user.id, row.kind, row.tmdb_id) } : null;
+        res.json({ found: true, tmdb, category: row.category_name || '', info, media: title });
     } catch (err) {
         console.error('[Details] Lookup failed:', err);
         res.status(500).json({ error: 'Details lookup failed' });
@@ -112,15 +110,15 @@ router.get('/variants', async (req, res) => {
 
         const db = getDb();
         const self = db.prepare(`
-            SELECT p.type, ${TMDB_KIND} AS kind,
-                IFNULL(CAST(json_extract(p.data, '$.tmdb') AS TEXT), '') AS tmdb
+            SELECT p.type, ml.media_id
             FROM playlist_items p
-            ${CATEGORY_JOIN}
+            ${media.linkJoin()}
             WHERE p.source_id = ? AND p.item_id = ?
             ORDER BY (p.type = ?) DESC
             LIMIT 1
         `).get(sourceId, String(itemId), type);
-        if (!self || !self.tmdb || self.tmdb === '0') return res.json([]);
+        // Only copies of one title (provider TMDB id or confirmed match) group
+        if (!self || !self.media_id) return res.json([]);
 
         const settings = await settingsDb.get();
         languages.ensureSqlFunctions();
@@ -133,9 +131,9 @@ router.get('/variants', async (req, res) => {
                 p.container_extension, p.year, p.rating, c.name AS category_name
             FROM playlist_items p
             ${CATEGORY_JOIN}
+            ${media.linkJoin('p', 'ml', false)}
             WHERE p.type = @type
-              AND CAST(json_extract(p.data, '$.tmdb') AS TEXT) = @tmdb
-              AND ${TMDB_KIND} = @kind
+              AND ml.media_id = @mediaId
               AND (
                 (p.source_id = @sourceId AND p.item_id = @itemId)
                 OR (p.is_hidden = 0 AND IFNULL(c.is_hidden, 0) = 0
@@ -145,7 +143,7 @@ router.get('/variants', async (req, res) => {
                 CASE WHEN lang_match(p.name, c.name, @lang) = 1 THEN 0 ELSE 1 END,
                 c.name, p.name
             LIMIT 200
-        `).all({ type: self.type, tmdb: self.tmdb, kind: self.kind, sourceId, itemId: String(itemId), lang, hard });
+        `).all({ type: self.type, mediaId: self.media_id, sourceId, itemId: String(itemId), lang, hard });
 
         res.json(rows.map(r => ({
             sourceId: r.source_id,

@@ -177,7 +177,8 @@ function refreshUserMedia(userId) {
                json_extract(h.data, '$.seriesId') AS series_id
         FROM watch_history h WHERE h.user_id = ?
     `).all(userId);
-    const link = db.prepare(`SELECT kind, tmdb_id FROM media_links WHERE source_id = ? AND item_id = ? AND kind = ? AND tmdb_id IS NOT NULL`);
+    const link = db.prepare(`SELECT kind, tmdb_id FROM media_links WHERE source_id = ? AND item_id = ? AND kind = ?
+        AND tmdb_id IS NOT NULL AND match IN ('tmdb', 'manual')`);
 
     const now = Date.now();
     const agg = new Map(); // key -> { kind, id, finished, partial, abandoned, last }

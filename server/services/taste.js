@@ -226,18 +226,20 @@ function matchLibrary(kind, ids, sourceIds, { lang = '', hard = false } = {}) {
     const rows = getDb().prepare(`
         SELECT p.source_id, p.item_id, p.name, p.stream_icon, p.rating, p.year, p.category_id,
                p.container_extension, c.name AS category,
-               CAST(json_extract(p.data, '$.tmdb') AS TEXT) AS tmdb_id,
+               ml.tmdb_id AS tmdb_id,
                ${meta ? 'm.overview, m.genres, m.release_date, m.vote_average'
                       : 'NULL AS overview, NULL AS genres, NULL AS release_date, NULL AS vote_average'}
         FROM playlist_items p
         LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id
-        ${meta ? `LEFT JOIN tmdb_meta m ON m.kind = @kind AND m.tmdb_id = CAST(json_extract(p.data, '$.tmdb') AS TEXT)` : ''}
+        ${require('./media').linkJoin('p', 'ml', false)}
+        ${meta ? `LEFT JOIN tmdb_meta m ON m.kind = ml.kind AND m.tmdb_id = ml.tmdb_id` : ''}
         WHERE ${typeClause}
           AND p.is_hidden = 0 AND (c.is_hidden IS NULL OR c.is_hidden = 0)
           AND p.source_id IN (SELECT value FROM json_each(@sources))
-          AND CAST(json_extract(p.data, '$.tmdb') AS TEXT) IN (SELECT value FROM json_each(@ids))
+          AND ml.kind = @kind
+          AND ml.tmdb_id IN (SELECT value FROM json_each(@ids))
         ORDER BY p.rowid
-    `).all({ ...(meta ? { kind } : {}), sources: JSON.stringify(sourceIds), ids: JSON.stringify([...new Set(ids)]) });
+    `).all({ kind, sources: JSON.stringify(sourceIds), ids: JSON.stringify([...new Set(ids)]) });
 
     const best = new Map();
     for (const row of rows) {

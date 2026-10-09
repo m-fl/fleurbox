@@ -52,19 +52,17 @@ function limitFor(user) {
 }
 
 /**
- * SQL condition: the playlist row `p` (category `c`, or null when the query
- * has no category join) is a title with a known level <= @kidsMax.
+ * SQL condition: the playlist row `p` is a copy of a title (media_links,
+ * trusted links only) with a known level <= @kidsMax.
  * Bind kidsMax: limitFor(user).
  */
-function allowedSql(p = 'p', c = 'c') {
-    const kind = c
-        ? `CASE WHEN ${p}.type = 'series' OR ${c}.type = 'series' THEN 'tv' ELSE 'movie' END`
-        : `CASE WHEN ${p}.type = 'series' THEN 'tv' ELSE 'movie' END`;
-    return `EXISTS (SELECT 1 FROM tmdb_meta km
-        WHERE km.status = 'ok'
-          AND km.kind = ${kind}
-          AND km.tmdb_id = CAST(json_extract(${p}.data, '$.tmdb') AS TEXT)
-          AND km.maturity IS NOT NULL AND km.maturity <= @kidsMax)`;
+// (the second argument, a category alias, is no longer needed: the link knows the kind)
+function allowedSql(p = 'p') {
+    return `EXISTS (SELECT 1 FROM media_links kl
+        JOIN tmdb_meta km ON km.kind = kl.kind AND km.tmdb_id = kl.tmdb_id
+        WHERE kl.source_id = ${p}.source_id AND kl.item_type = ${p}.type AND kl.item_id = ${p}.item_id
+          AND kl.match IN ('tmdb', 'manual')
+          AND km.status = 'ok' AND km.maturity IS NOT NULL AND km.maturity <= @kidsMax)`;
 }
 
 /**
