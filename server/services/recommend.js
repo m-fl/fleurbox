@@ -93,8 +93,13 @@ function ensureTables() {
 
 /** Relink the library's copies to their titles (services/media.js) */
 function rebuildLinks() {
-    require('./media').rebuild();
+    const media = require('./media');
+    media.rebuild();
     vectors = null; // the library changed
+    // Favourites/history: link to titles, move off copies that left the playlist
+    require('../db').settings.get()
+        .then(s => media.syncUserRows(s.languagePriority || ''))
+        .catch(err => console.error('[Media] User rows sync failed:', err));
 }
 
 // ===================== Title vectors =====================

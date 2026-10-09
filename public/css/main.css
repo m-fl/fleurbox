@@ -7904,3 +7904,12 @@ kbd {
     display: none;
   }
 }
+
+/* Home sidebar: a favourite channel that left the playlist (tap to check) */
+.rail-channel.is-missing {
+  opacity: 0.55;
+}
+
+.rail-channel.is-missing .rail-now {
+  font-style: italic;
+}

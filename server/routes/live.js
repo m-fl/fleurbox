@@ -212,6 +212,127 @@ router.get('/favorites', async (req, res) => {
     }
 });
 
+// Quality / feed tags left out when telling channels apart (as EventPage.channelKey)
+const QUALITY = new Set(['hd', 'fhd', 'uhd', 'sd', 'raw', '4k', '8k', 'hevc', 'h265', 'h264',
+    '1080p', '720p', '2160p', '3840p', '50fps', '60fps', 'backup', 'alt', 'bk', 'vip']);
+/** "UK: BBC ONE HD ◉" -> "uk bbc one": the same channel in another quality or feed */
+function channelKey(name) {
+    return String(name || '').normalize('NFKC').toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .split(' ')
+        .filter(w => w && !QUALITY.has(w))
+        .join(' ');
+}
+
+/**
+ * GET /api/live/favorites/missing - favourite channels no longer in the
+ * playlist: [{ sourceId, itemId, name }] (name as saved, may be null)
+ */
+router.get('/favorites/missing', async (req, res) => {
+    try {
+        require('../services/media').ensureUserColumns();
+        const favs = getDb().prepare(`
+            SELECT source_id, item_id, name FROM favorites WHERE user_id = ? AND item_type = 'channel'
+        `).all(req.user.id);
+        const sourceTypes = await liveSources();
+        const missing = favs.filter(f => !lookupChannels([{ sourceId: f.source_id, itemId: f.item_id }], sourceTypes).length);
+        res.json(missing.map(f => ({ sourceId: f.source_id, itemId: f.item_id, name: f.name })));
+    } catch (err) {
+        console.error('[Live] Missing favourites failed:', err);
+        res.status(500).json({ error: 'Failed to check favourites' });
+    }
+});
+
+/**
+ * POST /api/live/favorites/repair { sourceId, itemId }
+ * A favourite channel that left the playlist: the same channel under a new
+ * link, by its guide id first, then by its name without quality tags.
+ * Returns { candidate: channel | null } (kids accounts: whitelisted only).
+ */
+router.post('/favorites/repair', async (req, res) => {
+    try {
+        require('../services/media').ensureUserColumns();
+        const { sourceId, itemId } = req.body || {};
+        const fav = getDb().prepare(`
+            SELECT source_id, item_id, name, tvg_id FROM favorites
+            WHERE user_id = ? AND item_type = 'channel' AND source_id = ? AND item_id = ?
+        `).get(req.user.id, parseInt(sourceId, 10), String(itemId || ''));
+        if (!fav) return res.status(404).json({ error: 'Not a favourite' });
+
+        const sourceTypes = await liveSources();
+        const sources = JSON.stringify([...sourceTypes.keys()]);
+        const pick = rows => {
+            rows = maturity.filterChannels(req.user, rows);
+            const key = channelKey(fav.name);
+            // Same source and same name first, then same name, then anything
+            return rows.find(r => r.source_id === fav.source_id && key && channelKey(r.name) === key)
+                || rows.find(r => key && channelKey(r.name) === key)
+                || rows.find(r => r.source_id === fav.source_id) || rows[0] || null;
+        };
+        let found = null;
+        if (fav.tvg_id) {
+            found = pick(getDb().prepare(`
+                SELECT ${CHANNEL_COLUMNS} FROM playlist_items p ${CATEGORY_JOIN}
+                WHERE p.type = 'live' AND p.source_id IN (SELECT value FROM json_each(?))
+                  AND COALESCE(json_extract(p.data, '$.epg_channel_id'), json_extract(p.data, '$.tvgId')) = ?
+                  ${hiddenClause(false)}
+                ORDER BY p.rowid LIMIT 200
+            `).all(sources, fav.tvg_id));
+        }
+        if (!found && fav.name) {
+            // Name match: candidates share the name's longest word, then compare keys
+            const key = channelKey(fav.name);
+            const word = key.split(' ').sort((a, b) => b.length - a.length)[0] || '';
+            const rows = word.length >= 3 ? getDb().prepare(`
+                SELECT ${CHANNEL_COLUMNS} FROM playlist_items p ${CATEGORY_JOIN}
+                WHERE p.type = 'live' AND p.source_id IN (SELECT value FROM json_each(?))
+                  AND instr(lower(p.name), ?) > 0
+                  ${hiddenClause(false)}
+                ORDER BY p.rowid LIMIT 2000
+            `).all(sources, word) : [];
+            found = pick(rows.filter(r => channelKey(r.name) === key));
+        }
+        res.json({ candidate: found ? toChannel(found, sourceTypes) : null });
+    } catch (err) {
+        console.error('[Live] Favourite repair failed:', err);
+        res.status(500).json({ error: 'Repair lookup failed' });
+    }
+});
+
+/**
+ * POST /api/live/favorites/repoint { from: { sourceId, itemId }, to: { sourceId, itemId } }
+ * Move a favourite channel to its new link (to.itemId as the client keys
+ * channels, e.g. "xtream_2_1904231")
+ */
+router.post('/favorites/repoint', async (req, res) => {
+    try {
+        require('../services/media').ensureUserColumns();
+        const { from, to } = req.body || {};
+        const [channel] = maturity.filterChannels(req.user,
+            lookupChannels([{ sourceId: to?.sourceId, itemId: to?.itemId }], await liveSources()),
+            c => c.sourceId, c => c.streamId);
+        if (!channel) return res.status(404).json({ error: 'Channel not found' });
+        const db = getDb();
+        const data = db.prepare(`SELECT COALESCE(json_extract(data, '$.epg_channel_id'), json_extract(data, '$.tvgId')) AS tvg
+            FROM playlist_items WHERE source_id = ? AND type = 'live' AND item_id = ?`).get(channel.sourceId, String(channel.streamId));
+        const clash = db.prepare(`SELECT 1 FROM favorites WHERE user_id = ? AND item_type = 'channel' AND source_id = ? AND item_id = ?`)
+            .get(req.user.id, channel.sourceId, channel.id);
+        if (clash) {
+            db.prepare(`DELETE FROM favorites WHERE user_id = ? AND item_type = 'channel' AND source_id = ? AND item_id = ?`)
+                .run(req.user.id, parseInt(from?.sourceId, 10), String(from?.itemId || ''));
+        } else {
+            db.prepare(`UPDATE favorites SET source_id = ?, item_id = ?, name = ?, tvg_id = ?
+                WHERE user_id = ? AND item_type = 'channel' AND source_id = ? AND item_id = ?`)
+                .run(channel.sourceId, channel.id, channel.name, data?.tvg || null,
+                    req.user.id, parseInt(from?.sourceId, 10), String(from?.itemId || ''));
+        }
+        res.json({ channel });
+    } catch (err) {
+        console.error('[Live] Favourite repoint failed:', err);
+        res.status(500).json({ error: 'Failed to move favourite' });
+    }
+});
+
 /**
  * GET /api/live/channel?sourceId=&itemId= - one channel, or 404
  */

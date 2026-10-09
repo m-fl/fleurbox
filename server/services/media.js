@@ -303,6 +303,166 @@ function setOverride(sourceId, itemType, itemId, mediaId) {
     }
 }
 
+// ===================== User rows: favourites and watch history =====================
+//
+// Favourites and history keep the copy they were made on (source_id, item_id:
+// what gets played) and also record the title (media_id; episodes: season +
+// episode). After each rebuild, rows whose copy left the playlist are pointed
+// at another copy of the same title, so nothing downstream has to change.
+// Only links that mean "the same title" count (TRUSTED) - and a local title's
+// own link, which is its only copy.
+
+let userColumnsReady = false;
+function ensureUserColumns() {
+    if (userColumnsReady) return;
+    const db = getDb();
+    const add = (table, name, type) => {
+        const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+        if (!cols.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    };
+    add('watch_history', 'media_id', 'INTEGER');
+    add('watch_history', 'season', 'INTEGER');
+    add('watch_history', 'episode', 'INTEGER');
+    add('favorites', 'media_id', 'INTEGER');
+    // Channels: what the favourite was, so a vanished one can be found again
+    add('favorites', 'name', 'TEXT');
+    add('favorites', 'tvg_id', 'TEXT');
+    db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_history_user_media ON watch_history(user_id, media_id);
+        CREATE INDEX IF NOT EXISTS idx_favorites_user_media ON favorites(user_id, media_id);
+    `);
+    userColumnsReady = true;
+}
+
+/** The title a copy belongs to (media_id) when that link can be trusted, else null */
+function titleOf(sourceId, itemType, itemId) {
+    ensureTables();
+    const row = getDb().prepare(`
+        SELECT media_id FROM media_links
+        WHERE source_id = ? AND item_type = ? AND item_id = ? AND match IN ('tmdb', 'manual', 'local')
+    `).get(parseInt(sourceId, 10), itemType, String(itemId));
+    return row ? row.media_id : null;
+}
+
+/**
+ * Fill media_id (and season/episode) on rows that lack them, then repoint
+ * rows whose copy is gone - to a copy in `lang` (Settings > Language
+ * Priority) when there is one. Returns { filled, repointed }.
+ */
+function syncUserRows(lang = '') {
+    ensureTables();
+    ensureUserColumns();
+    const db = getDb();
+    const languages = require('./languages');
+    let filled = 0;
+    let repointed = 0;
+
+    db.transaction(() => {
+        // Movies (and series favourites): through the copy itself
+        filled += db.prepare(`
+            UPDATE watch_history SET media_id = (
+                SELECT l.media_id FROM media_links l
+                WHERE l.source_id = watch_history.source_id AND l.item_type = 'movie'
+                  AND l.item_id = watch_history.item_id AND l.match IN ('tmdb', 'manual', 'local'))
+            WHERE media_id IS NULL AND item_type = 'movie'
+        `).run().changes;
+        // Episodes: through the series the history saved, plus season/episode
+        filled += db.prepare(`
+            UPDATE watch_history SET
+                media_id = (
+                    SELECT l.media_id FROM media_links l
+                    WHERE l.source_id = watch_history.source_id AND l.item_type = 'series'
+                      AND l.item_id = CAST(json_extract(watch_history.data, '$.seriesId') AS TEXT)
+                      AND l.match IN ('tmdb', 'manual', 'local')),
+                season = CAST(json_extract(data, '$.currentSeason') AS INTEGER),
+                episode = CAST(json_extract(data, '$.currentEpisode') AS INTEGER)
+            WHERE media_id IS NULL AND item_type = 'episode'
+        `).run().changes;
+        filled += db.prepare(`
+            UPDATE favorites SET media_id = (
+                SELECT l.media_id FROM media_links l
+                WHERE l.source_id = favorites.source_id AND l.item_type = favorites.item_type
+                  AND l.item_id = favorites.item_id AND l.match IN ('tmdb', 'manual', 'local'))
+            WHERE media_id IS NULL AND item_type IN ('movie', 'series')
+        `).run().changes;
+    })();
+
+    // Channel favourites saved before name/guide id were kept: fill them in
+    // while the channel still exists (ids may be "xtream_<src>_<id>")
+    const chan = db.prepare(`SELECT name, COALESCE(json_extract(data, '$.epg_channel_id'), json_extract(data, '$.tvgId')) AS tvg
+        FROM playlist_items WHERE source_id = ? AND type = 'live' AND item_id = ?`);
+    const setChan = db.prepare('UPDATE favorites SET name = ?, tvg_id = ? WHERE id = ?');
+    db.transaction(() => {
+        for (const f of db.prepare(`SELECT id, source_id, item_id FROM favorites WHERE item_type = 'channel' AND name IS NULL`).all()) {
+            const m = /^(?:xtream|m3u)_\d+_(.+)$/.exec(String(f.item_id));
+            const row = chan.get(f.source_id, m ? m[1] : String(f.item_id));
+            if (row) { setChan.run(row.name, row.tvg || null, f.id); filled++; }
+        }
+    })();
+
+    // Repoint: a row's copy is gone, its title has another copy
+    const copiesOf = db.prepare(`
+        SELECT l.source_id, l.item_id, p.name, c.name AS category
+        FROM media_links l
+        JOIN playlist_items p ON p.source_id = l.source_id AND p.type = l.item_type AND p.item_id = l.item_id
+        LEFT JOIN categories c ON c.id = p.source_id || ':' || p.category_id
+        WHERE l.media_id = ? AND l.item_type = ? AND l.match IN ('tmdb', 'manual', 'local') AND p.is_hidden = 0
+        ORDER BY p.rowid
+    `);
+    const best = (mediaId, itemType, preferLang) => {
+        const copies = copiesOf.all(mediaId, itemType);
+        return copies.find(c => preferLang && languages.matches(c.name, c.category, preferLang)) || copies[0] || null;
+    };
+    const exists = db.prepare('SELECT 1 FROM playlist_items WHERE source_id = ? AND type = ? AND item_id = ?');
+
+    db.transaction(() => {
+        // Favourite movies/series
+        const favs = db.prepare(`SELECT id, user_id, source_id, item_id, item_type, media_id FROM favorites
+            WHERE item_type IN ('movie', 'series') AND media_id IS NOT NULL`).all();
+        for (const f of favs) {
+            if (exists.get(f.source_id, f.item_type, String(f.item_id))) continue;
+            const to = best(f.media_id, f.item_type, lang);
+            if (!to) continue;
+            // INSERT OR IGNORE semantics: a favourite of that copy may exist already
+            const clash = db.prepare('SELECT 1 FROM favorites WHERE user_id = ? AND source_id = ? AND item_id = ? AND item_type = ?')
+                .get(f.user_id, to.source_id, String(to.item_id), f.item_type);
+            if (clash) db.prepare('DELETE FROM favorites WHERE id = ?').run(f.id);
+            else db.prepare('UPDATE favorites SET source_id = ?, item_id = ? WHERE id = ?').run(to.source_id, String(to.item_id), f.id);
+            repointed++;
+        }
+        // Movie history (episodes are resolved when played: their ids come
+        // from the provider's episode list, see routes/home.js)
+        const hist = db.prepare(`SELECT id, user_id, source_id, item_id, media_id FROM watch_history
+            WHERE item_type = 'movie' AND media_id IS NOT NULL`).all();
+        for (const h of hist) {
+            if (exists.get(h.source_id, 'movie', String(h.item_id))) continue;
+            const to = best(h.media_id, 'movie', lang);
+            if (!to) continue;
+            const newId = `${h.user_id}:${to.item_id}`;
+            if (db.prepare('SELECT 1 FROM watch_history WHERE id = ?').get(newId)) continue; // that copy has its own row
+            db.prepare('UPDATE watch_history SET id = ?, source_id = ?, item_id = ? WHERE id = ?')
+                .run(newId, to.source_id, String(to.item_id), h.id);
+            repointed++;
+        }
+        // Series in episode history: point data.seriesId at a live copy of the series
+        const eps = db.prepare(`SELECT id, source_id, media_id, CAST(json_extract(data, '$.seriesId') AS TEXT) AS series_id
+            FROM watch_history WHERE item_type = 'episode' AND media_id IS NOT NULL`).all();
+        for (const e of eps) {
+            if (!e.series_id || exists.get(e.source_id, 'series', e.series_id)) continue;
+            const to = best(e.media_id, 'series', lang);
+            if (!to) continue;
+            // relinked: the episode id is from the old copy - Continue Watching
+            // finds the same season/episode in the new copy (routes/home.js)
+            db.prepare(`UPDATE watch_history SET source_id = ?, data = json_set(data, '$.seriesId', ?, '$.relinked', 1) WHERE id = ?`)
+                .run(to.source_id, String(to.item_id), e.id);
+            repointed++;
+        }
+    })();
+
+    if (filled || repointed) console.log(`[Media] User rows: ${filled} linked to titles, ${repointed} moved to a live copy`);
+    return { filled, repointed };
+}
+
 // ===================== Review (Settings > Title matches) =====================
 
 /**
@@ -371,4 +531,5 @@ function review(copies, action) {
     return done;
 }
 
-module.exports = { ensureTables, rebuild, forCopy, setOverride, cleanName, nameYear, reviewList, review, linkJoin, TRUSTED };
+module.exports = { ensureTables, rebuild, forCopy, setOverride, cleanName, nameYear, reviewList, review, linkJoin, TRUSTED,
+    ensureUserColumns, titleOf, syncUserRows };

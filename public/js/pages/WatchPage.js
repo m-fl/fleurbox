@@ -315,12 +315,7 @@ class WatchPage {
         }
 
         try {
-            const history = await API.request('GET', '/history?limit=500').catch(() => []);
-            const resumeFor = (id) => {
-                const h = (history || []).find(r => String(r.item_id) === String(id));
-                return h && h.duration && h.progress < h.duration * 0.95 ? h.progress : 0;
-            };
-
+            // Resume point: play() asks the server (resumeTime left undefined)
             if (type === 'movie' && ids.length === 1) {
                 const vodId = ids[0];
                 const vod = await API.proxy.xtream.vodInfo(sourceId, vodId);
@@ -340,8 +335,7 @@ class WatchPage {
                     rating: info.rating,
                     sourceId,
                     categoryId: movieData.category_id,
-                    containerExtension: container,
-                    resumeTime: resumeFor(vodId)
+                    containerExtension: container
                 }, result.url);
                 return true;
             }
@@ -373,8 +367,7 @@ class WatchPage {
                     seriesInfo,
                     currentSeason: ep.seasonNum,
                     currentEpisode: ep.episode_num,
-                    containerExtension: container,
-                    resumeTime: resumeFor(episodeId)
+                    containerExtension: container
                 }, result.url);
                 return true;
             }
@@ -396,6 +389,9 @@ class WatchPage {
         this.currentSeason = content.currentSeason || null;
         this.currentEpisode = content.currentEpisode || null;
         this.resumeTime = content.resumeTime || 0;
+        // No resume point given (Movies/Series pages, a link): where the user
+        // left off in ANY copy of this title, in seconds (GET /api/history/resume)
+        if (content.resumeTime === undefined) this.resumeTime = await this.lookupResume(content);
         this.containerExtension = content.containerExtension || 'mp4';
         // New title -> go back to the stream's default audio track
         this.selectedAudioTrack = 0;
@@ -1801,6 +1797,28 @@ class WatchPage {
         if (this.historyInterval) {
             clearInterval(this.historyInterval);
             this.historyInterval = null;
+        }
+    }
+
+    /** Seconds to resume `content` at (any copy of the title), 0 = from the start */
+    async lookupResume(content) {
+        const isEpisode = content.type !== 'movie';
+        const params = new URLSearchParams({
+            type: isEpisode ? 'episode' : 'movie',
+            sourceId: content.sourceId || '',
+            itemId: content.id || '',
+            ...(isEpisode ? {
+                seriesId: content.seriesId || '',
+                season: content.currentSeason || '',
+                episode: content.currentEpisode || ''
+            } : {})
+        });
+        try {
+            const res = await API.request('GET', `/history/resume?${params}`);
+            return res?.position || 0;
+        } catch (err) {
+            console.warn('[WatchPage] Resume lookup failed:', err);
+            return 0;
         }
     }
 

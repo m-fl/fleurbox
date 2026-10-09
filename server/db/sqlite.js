@@ -180,32 +180,38 @@ const favorites = {
         return db.prepare(sql).all(...params);
     },
 
-    add(userId, sourceId, itemId, itemType = 'channel') {
+    // extra: { mediaId } for movies/series (the title, services/media.js),
+    // { name, tvgId } for channels (to find a vanished channel again)
+    add(userId, sourceId, itemId, itemType = 'channel', extra = {}) {
         const db = getDb();
         const stmt = db.prepare(`
-            INSERT OR IGNORE INTO favorites (user_id, source_id, item_id, item_type)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO favorites (user_id, source_id, item_id, item_type, media_id, name, tvg_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         `);
-        const result = stmt.run(userId, sourceId, itemId, itemType);
+        const result = stmt.run(userId, sourceId, itemId, itemType, extra.mediaId ?? null, extra.name ?? null, extra.tvgId ?? null);
         return result.changes > 0;
     },
 
-    remove(userId, sourceId, itemId, itemType = 'channel') {
+    // mediaId: also remove the title's favourite made on another copy
+    remove(userId, sourceId, itemId, itemType = 'channel', mediaId = null) {
         const db = getDb();
         const stmt = db.prepare(`
-            DELETE FROM favorites 
-            WHERE user_id = ? AND source_id = ? AND item_id = ? AND item_type = ?
+            DELETE FROM favorites
+            WHERE user_id = ? AND item_type = ?
+              AND ((source_id = ? AND item_id = ?) OR (? IS NOT NULL AND media_id = ?))
         `);
-        const result = stmt.run(userId, sourceId, itemId, itemType);
+        const result = stmt.run(userId, itemType, sourceId, itemId, mediaId, mediaId);
         return result.changes > 0;
     },
 
-    isFavorite(userId, sourceId, itemId, itemType = 'channel') {
+    // mediaId: a favourite of any copy of the title counts
+    isFavorite(userId, sourceId, itemId, itemType = 'channel', mediaId = null) {
         const db = getDb();
         const row = db.prepare(`
-            SELECT 1 FROM favorites 
-            WHERE user_id = ? AND source_id = ? AND item_id = ? AND item_type = ?
-        `).get(userId, sourceId, itemId, itemType);
+            SELECT 1 FROM favorites
+            WHERE user_id = ? AND item_type = ?
+              AND ((source_id = ? AND item_id = ?) OR (? IS NOT NULL AND media_id = ?))
+        `).get(userId, itemType, sourceId, itemId, mediaId, mediaId);
         return !!row;
     },
 

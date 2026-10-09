@@ -25,6 +25,19 @@ const MIN_EPISODE_PROGRESS_S = 30;
 
 // ===================== Continue Watching =====================
 
+/** Point an episode's history row at its id in the series' new copy */
+function relink(row, episodeId, data) {
+    const db = getDb();
+    const newId = `${row.user_id}:${episodeId}`;
+    const { relinked, ...rest } = data;
+    if (db.prepare('SELECT 1 FROM watch_history WHERE id = ?').get(newId)) {
+        db.prepare('DELETE FROM watch_history WHERE id = ?').run(row.id); // the new copy has its own row
+    } else {
+        db.prepare('UPDATE watch_history SET id = ?, item_id = ?, data = ? WHERE id = ?')
+            .run(newId, episodeId, JSON.stringify(rest), row.id);
+    }
+}
+
 /**
  * Episodes of a series in watch order (season, then episode number), from the
  * provider's series_info (cached 1h, same cache key as the proxy route)
@@ -61,17 +74,23 @@ router.get('/continue', async (req, res) => {
 
         const picked = [];
         const seenSeries = new Set();
+        const seenMovies = new Set();
         for (const row of rows) {
             if (picked.length >= limit) break;
             const data = JSON.parse(row.data || '{}');
             const finished = row.duration > 0 && row.progress >= row.duration * FINISHED_RATIO;
 
             if (row.item_type === 'movie') {
+                // One entry per title, however many of its copies were watched
+                const movieKey = row.media_id ? `m:${row.media_id}` : `movie:${row.item_id}`;
+                if (seenMovies.has(movieKey)) continue;
+                seenMovies.add(movieKey);
                 if (!finished && row.progress >= MIN_MOVIE_PROGRESS_S) picked.push({ row, data });
                 continue;
             }
-            // Episodes: only the latest one per series counts
-            const seriesKey = data.seriesId ? `${row.source_id}:${data.seriesId}` : `ep:${row.item_id}`;
+            // Episodes: only the latest one per series (per title, when known) counts
+            const seriesKey = row.media_id ? `m:${row.media_id}`
+                : data.seriesId ? `${row.source_id}:${data.seriesId}` : `ep:${row.item_id}`;
             if (seenSeries.has(seriesKey)) continue;
             if (!finished && row.progress < MIN_EPISODE_PROGRESS_S) continue;
             seenSeries.add(seriesKey);
@@ -90,12 +109,30 @@ router.get('/continue', async (req, res) => {
                 updated_at: row.updated_at,
                 data
             };
+            // A series moved to a new copy (services/media.js syncUserRows):
+            // the saved episode id is the old copy's - find the same episode
+            let episodes = null;
+            const sameEpisode = ep => ep.season === parseInt(data.currentSeason, 10)
+                && parseInt(ep.episode_num, 10) === parseInt(data.currentEpisode, 10);
+            if (data.relinked && data.seriesId && row.source_id) {
+                try {
+                    episodes = await seriesEpisodes(row.source_id, data.seriesId);
+                    const ep = episodes.find(sameEpisode);
+                    if (ep) {
+                        relink(row, String(ep.id), data);
+                        base.item_id = String(ep.id);
+                        base.key = `series:${data.seriesId}:${ep.id}`;
+                    }
+                } catch (err) {
+                    console.warn(`[Home] Relinking series ${data.seriesId} failed:`, err.message);
+                }
+            }
             if (!finished) return base;
             if (!data.seriesId || !row.source_id) return null;
 
             try {
-                const episodes = await seriesEpisodes(row.source_id, data.seriesId);
-                const at = episodes.findIndex(ep => String(ep.id) === String(row.item_id));
+                episodes = episodes || await seriesEpisodes(row.source_id, data.seriesId);
+                const at = episodes.findIndex(ep => String(ep.id) === String(base.item_id));
                 const next = at >= 0 ? episodes[at + 1] : null;
                 if (!next) return null; // caught up with the series
                 return {

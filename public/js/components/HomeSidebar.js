@@ -235,7 +235,12 @@ class HomeSidebar {
         const list = document.getElementById('rail-channels');
         if (!list) return;
         try {
-            this.channels = await window.API.live.favorites() || [];
+            // Favourites that left the playlist come separately: shown greyed,
+            // and checked when tapped (repairFavourite)
+            [this.channels, this.missing] = await Promise.all([
+                window.API.live.favorites().then(r => r || []),
+                window.API.request('GET', '/live/favorites/missing').catch(() => [])
+            ]);
         } catch (err) {
             console.error('[Sidebar] Favourite channels failed:', err);
             list.innerHTML = '<div class="rail-empty">Couldn\'t load favourites</div>';
@@ -243,7 +248,7 @@ class HomeSidebar {
         }
         if (!list.isConnected) return;
 
-        if (!this.channels.length) {
+        if (!this.channels.length && !this.missing.length) {
             list.innerHTML = `
                 <div class="rail-empty">
                     <span>No favourites yet</span>
@@ -266,9 +271,19 @@ class HomeSidebar {
                         <span class="rail-progress"><span data-progress="${i}"></span></span>
                     </span>
                 </button>`;
-        }).join('');
+        }).join('') + this.missing.map((fav, i) => `
+                <button class="rail-channel is-missing" data-missing="${i}" title="No longer available - tap to check">
+                    <span class="rail-logo"><img src="/img/placeholder.png" alt=""></span>
+                    <span class="rail-channel-text">
+                        <span class="rail-channel-name">${this.escape(this.cleanName(fav.name || 'Removed channel'))}</span>
+                        <span class="rail-now">Unavailable</span>
+                    </span>
+                </button>`).join('');
 
-        list.querySelectorAll('.rail-channel').forEach(btn => {
+        list.querySelectorAll('.rail-channel[data-missing]').forEach(btn => {
+            btn.addEventListener('click', () => this.repairFavourite(this.missing[btn.dataset.missing]));
+        });
+        list.querySelectorAll('.rail-channel[data-index]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const ch = this.channels[btn.dataset.index];
                 this.setDrawer(false);
@@ -282,6 +297,44 @@ class HomeSidebar {
             if (!list.isConnected) return clearInterval(this.nowTimer);
             if (this.app.currentPage === 'home' && !document.hidden) this.refreshNow();
         }, NOW_REFRESH_MS);
+    }
+
+    /**
+     * A favourite channel that left the playlist was tapped: look for the same
+     * channel under a new link (guide id, then name). Found -> offer to switch
+     * the favourite and play it; not found -> say so and remove it.
+     */
+    async repairFavourite(fav) {
+        if (!fav) return;
+        const old = this.cleanName(fav.name || 'This channel');
+        let candidate = null;
+        try {
+            ({ candidate } = await window.API.request('POST', '/live/favorites/repair', { sourceId: fav.sourceId, itemId: fav.itemId }));
+        } catch (err) {
+            console.error('[Sidebar] Favourite repair failed:', err);
+            alert(`Couldn't check "${old}" right now. Try again later.`);
+            return;
+        }
+        if (candidate) {
+            const ok = confirm(`"${old}" isn't available under its old link any more.\n\n` +
+                `Switch this favourite to "${this.cleanName(candidate.name)}"? It looks like the same channel.`);
+            if (!ok) return;
+            try {
+                await window.API.request('POST', '/live/favorites/repoint', {
+                    from: { sourceId: fav.sourceId, itemId: fav.itemId },
+                    to: { sourceId: candidate.sourceId, itemId: candidate.id }
+                });
+            } catch (err) {
+                alert(`Couldn't move the favourite: ${err.message}`);
+                return;
+            }
+            this.setDrawer(false);
+            this.home.playChannel(candidate);
+        } else {
+            alert(`"${old}" isn't offered by your provider any more, so it has been removed from your favourites.`);
+            await window.API.favorites.remove(fav.sourceId, fav.itemId, 'channel').catch(() => {});
+        }
+        this.loadChannels();
     }
 
     /** "US: FOX (KMPH) FRESNO HD" -> "FOX (KMPH) FRESNO HD": the prefix is noise in a narrow list */
