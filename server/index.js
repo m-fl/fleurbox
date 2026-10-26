@@ -259,9 +259,21 @@ app.use('/api', (req, res, next) => {
     next();
 });
 
+// Logins without a provider of their own (not admin logins) get only the
+// welcome form until they add one (public/js/app.js showProviderGate).
+// Profiles and their switching live under /api/auth, so they stay open.
+// Sealed links have no req.user: streamRef checks the link's owner instead.
+const OPEN_WITHOUT_PROVIDER = /^\/(direct|profile|version)(\/|$)/;
+app.use('/api', (req, res, next) => {
+    if (!req.user || OPEN_WITHOUT_PROVIDER.test(req.path)) return next();
+    if (require('./services/directPlay').mayUseServerSources(req.user)) return next();
+    res.status(403).json({ error: 'Add your provider to start watching', needsProvider: true });
+});
+
 app.use('/api/sources', require('./routes/sources'));
 app.use('/api/proxy', require('./routes/proxy'));
 app.use('/api/stream', require('./routes/stream'));
+app.use('/api/direct', require('./routes/direct'));
 app.use('/api/media', require('./routes/media'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/live', require('./routes/live'));

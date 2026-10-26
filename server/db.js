@@ -405,6 +405,8 @@ const users = {
       maxMaturity: userData.kids ? (userData.maxMaturity || null) : null,
       oidcId: userData.oidcId || null,
       email: userData.email || null,
+      // A profile of another login (services/profiles.js)
+      ...(userData.parentId ? { parentId: userData.parentId } : {}),
       createdAt: new Date().toISOString()
     };
 

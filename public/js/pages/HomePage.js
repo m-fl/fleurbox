@@ -615,7 +615,9 @@ class HomePage {
             if (result && result.url) {
                 const content = {
                     id: item.item_id,
-                    type: type,
+                    // History stores episodes as "episode"; WatchPage only knows
+                    // "movie" / "series" (next-episode autoplay, episode controls)
+                    type: type === 'movie' ? 'movie' : 'series',
                     title: item.name || item.data.title,
                     subtitle: item.data.subtitle || (type === 'movie' ? 'Movie' : 'Series'),
                     poster: item.stream_icon || item.data.poster,

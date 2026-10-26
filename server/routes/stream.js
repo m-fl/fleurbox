@@ -176,22 +176,22 @@ async function proxyStream(req, res, url, user) {
  */
 router.get('/link', async (req, res) => {
     const ref = String(req.query.url || '');
-    if (!/^\/api\/stream\/[xm]\//.test(ref)) {
+    if (!/^\/api\/stream\/[xmu]\//.test(ref)) {
         return res.status(400).json({ error: 'Not a stream reference' });
     }
     try {
-        await streamRef.resolve(ref);
+        await streamRef.resolve(ref, req.user);
         res.json({ url: streamRef.sealRef(ref, req.user), expiresIn: streamRef.SHARE_TTL_MS / 1000 });
     } catch (err) {
         res.status(err.status || 400).json({ error: err.message });
     }
 });
 
-/** Play a reference: /api/stream/x/..., /api/stream/m/..., /api/stream/s/... */
-router.get(/^\/[xms]\//, lockDown, async (req, res) => {
+/** Play a reference: /api/stream/x/..., /api/stream/m/..., /api/stream/u/..., /api/stream/s/... */
+router.get(/^\/[xmus]\//, lockDown, async (req, res) => {
     let resolved;
     try {
-        resolved = await streamRef.resolve(req.baseUrl + req.path);
+        resolved = await streamRef.resolve(req.baseUrl + req.path, req.user);
     } catch (err) {
         return res.status(err.status || 400).json({ error: err.message });
     }

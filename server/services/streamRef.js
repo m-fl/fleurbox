@@ -8,6 +8,8 @@
  *
  *   /api/stream/x/<sourceId>/<type>/<streamId>.<ext>   Xtream stream (type live|movie|series)
  *   /api/stream/m/<sourceId>/<itemId>                  M3U playlist item
+ *   /api/stream/u/<providerId>/<type>/<streamId>.<ext> the user's own provider login
+ *                                                      (services/directPlay.js; owner only)
  *   /api/stream/s/<token>/<name>                       sealed link, works without a login
  *
  * A sealed link is the server's own encrypted note of a URL or reference, with
@@ -27,9 +29,15 @@ const SHARE_TTL_MS = 24 * 60 * 60 * 1000;   // "Copy Stream URL"
 const XTREAM_TYPES = { live: 'live', movie: 'movie', vod: 'movie', series: 'series' };
 const XTREAM_REF = /^\/api\/stream\/x\/(\d+)\/(live|movie|series)\/([A-Za-z0-9_-]+)\.([A-Za-z0-9]{1,5})$/;
 const M3U_REF = /^\/api\/stream\/m\/(\d+)\/([^/]+)$/;
+const USER_REF = /^\/api\/stream\/u\/(\d+)\/(live|movie|series)\/([A-Za-z0-9_-]+)\.([A-Za-z0-9]{1,5})$/;
 const SEALED_REF = /^\/api\/stream\/s\/([A-Za-z0-9_-]+)(?:\/[^/]*)?$/;
 
 const refError = (status, message) => Object.assign(new Error(message), { status });
+
+/** x / m references play the server's own sources: see directPlay.mayUseServerSources */
+function assertServerSources(user) {
+    if (!require('./directPlay').mayUseServerSources(user)) throw refError(403, 'Add your provider to start watching');
+}
 
 function xtreamRef(sourceId, streamId, type = 'live', container = 'm3u8') {
     const kind = XTREAM_TYPES[type];
@@ -79,20 +87,25 @@ async function unseal(token) {
     if (!(payload.exp > Date.now())) throw refError(403, 'Link expired');
     const user = await users.getById(payload.uid);
     if (!user || (user.tokenVersion || 0) !== payload.tv) throw refError(403, 'Link revoked');
-    return { payload, user };
+    // A profile's links end with its login (services/profiles.js)
+    const parent = user.parentId ? await users.getById(user.parentId) : null;
+    if (user.parentId && !parent) throw refError(403, 'Link revoked');
+    return { payload, user: require('./profiles').sessionUser(user, parent) };
 }
 
 /**
  * Resolve a reference to the upstream URL.
+ * `asUser`: who is asking (user-provider references resolve only for their owner).
  * Returns { url, user } - user is the owner of a sealed link (null otherwise).
  * Throws an Error with .status 400/403/404.
  */
-async function resolve(ref) {
+async function resolve(ref, asUser = null) {
     const path = String(ref || '').split('?')[0];
     let m;
 
     if ((m = path.match(XTREAM_REF))) {
         const [, sourceId, type, streamId, ext] = m;
+        assertServerSources(asUser);
         const source = await sources.getById(sourceId);
         if (!source || source.type !== 'xtream') throw refError(404, 'Source not found');
         const base = source.url.replace(/\/$/, '');
@@ -100,8 +113,29 @@ async function resolve(ref) {
         return { url: `${base}/${type}/${source.username}/${source.password}/${streamId}.${ext}`, user: null };
     }
 
+    if ((m = path.match(USER_REF))) {
+        const [, providerId, type, streamId, ext] = m;
+        // Another login's provider is "not found"; kids profiles get live
+        // channels only when whitelisted
+        if (!asUser) throw refError(404, 'Stream not found');
+        if (type === 'live' && !(await require('./directPlay').kidsLiveAllowed(asUser, providerId, streamId))) {
+            throw refError(404, 'Stream not found');
+        }
+        let target;
+        try {
+            target = require('./directPlay').refUrl(asUser.accountId ?? asUser.id, providerId, type, streamId, ext);
+        } catch (err) {
+            throw refError(err.status || 404, err.message);
+        }
+        // The user typed this host in: ffmpeg and the proxy may only reach it
+        // when it is on the public internet (or a configured source host)
+        await require('./urlGuard').assertAllowed(target.host);
+        return { url: target.url, user: null };
+    }
+
     if ((m = path.match(M3U_REF))) {
         const [, sourceId, itemId] = m;
+        assertServerSources(asUser);
         const { getDb } = require('../db/sqlite');
         const row = getDb().prepare(`SELECT stream_url, data FROM playlist_items WHERE source_id = ? AND item_id = ? AND type = 'live'`)
             .get(parseInt(sourceId, 10), decodeURIComponent(itemId));
@@ -114,7 +148,7 @@ async function resolve(ref) {
     if ((m = path.match(SEALED_REF))) {
         const { payload, user } = await unseal(m[1]);
         if (payload.u) return { url: payload.u, user };
-        if (payload.r && !SEALED_REF.test(payload.r)) return { url: (await resolve(payload.r)).url, user };
+        if (payload.r && !SEALED_REF.test(payload.r)) return { url: (await resolve(payload.r, user)).url, user };
         throw refError(403, 'Invalid link');
     }
 
@@ -128,7 +162,7 @@ async function resolve(ref) {
 function requireStreamRef(req, res, next) {
     const ref = req.query.url ?? req.body?.url;
     if (!ref) return next(); // the route reports the missing parameter
-    resolve(ref).then(({ url }) => {
+    resolve(ref, req.user).then(({ url }) => {
         req.streamRef = String(ref);
         req.streamUrl = url;
         next();

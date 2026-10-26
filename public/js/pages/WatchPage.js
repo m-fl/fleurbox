@@ -578,6 +578,16 @@ class WatchPage {
         }
         if (superseded()) return;
 
+        // The user's own provider (js/directPlay.js): straight to this browser
+        // when it can play the stream, else the server path on their login
+        const direct = await this.findDirect(url);
+        if (superseded()) return;
+        if (direct) {
+            if (this.playDirect(direct, settings)) return;
+            url = direct.ref;
+            this.currentUrl = url;
+        }
+
         // Detect stream type
         const looksLikeHls = url.includes('.m3u8') || url.includes('m3u8');
         const isRawTs = url.includes('.ts') && !url.includes('.m3u8');
@@ -745,6 +755,78 @@ class WatchPage {
         this.setVolumeFromStorage();
     }
 
+    /** The user's own stream for the current title (GET /api/direct/resolve), or null */
+    async findDirect(url) {
+        const c = this.content;
+        if (!window.DirectPlay || !c?.sourceId || String(url).startsWith('/api/stream/u/')) return null;
+        return DirectPlay.resolve(c.type === 'movie'
+            ? { type: 'movie', sourceId: c.sourceId, itemId: c.id }
+            : { type: 'episode', sourceId: c.sourceId, itemId: c.id, seriesId: c.seriesId,
+                season: this.currentSeason, episode: this.currentEpisode, container: this.containerExtension });
+    }
+
+    /**
+     * Play `direct` from the provider in this browser, when nothing asks for
+     * the server (forced transcode/proxy, upscaling, another audio track) and
+     * the browser can play it. Returns false to use the server path instead.
+     */
+    playDirect(direct, settings) {
+        if (settings.forceVideoTranscode || settings.forceTranscode || settings.upscaleEnabled ||
+            settings.forceProxy || this.selectedAudioTrack > 0) return false;
+        const mode = DirectPlay.mode(direct, this.video);
+        if (!mode) return false;
+
+        console.log(`[WatchPage] Direct play from your provider (${mode}, matched by ${direct.match})`);
+        this.direct = { ...direct, mode, confirmed: false };
+        this.currentUrl = direct.ref; // retries, audio switch and "Copy Stream URL" use the server path
+        this.updateTranscodeStatus('direct', 'Direct (your provider)');
+        if (mode === 'hls') {
+            this.playHls(direct.url);
+        } else {
+            this.video.src = direct.url;
+            this.video.play().catch(e => {
+                if (e.name !== 'AbortError') console.error('[WatchPage] Autoplay error:', e);
+            });
+        }
+        this.setVolumeFromStorage();
+        return true;
+    }
+
+    /** Direct play is running: picture and sound arrived -> report it; none -> fall back */
+    checkDirect() {
+        const d = this.direct;
+        if (!d || d.confirmed || d.failed) return;
+        if (this.video.videoWidth === 0) return this.directFailed('no picture (video codec)');
+        d.confirmed = true;
+        // Sound: browsers that count decoded audio (Chrome, Firefox) - an AC3/DTS
+        // track in an mp4 plays silent otherwise
+        setTimeout(() => {
+            if (this.direct !== d || this.video.paused || this.video.currentTime < 1) return;
+            const silent = ('webkitAudioDecodedByteCount' in this.video && this.video.webkitAudioDecodedByteCount === 0) ||
+                ('mozHasAudio' in this.video && this.video.mozHasAudio === false);
+            if (silent) return this.directFailed('no sound (audio codec)');
+            DirectPlay.reportProbe(d, true, {
+                width: this.video.videoWidth, height: this.video.videoHeight, mode: d.mode,
+                duration: Number.isFinite(this.video.duration) ? this.video.duration : null
+            });
+        }, 4000);
+    }
+
+    /** Direct play failed: remember it, then play through the server on the user's login */
+    async directFailed(reason) {
+        const d = this.direct;
+        if (!d || d.failed) return;
+        d.failed = true;
+        console.warn(`[WatchPage] Direct play failed (${reason}) - using the server`);
+        DirectPlay.reportProbe(d, false, { error: reason, mode: d.mode });
+        const at = this.video?.currentTime || 0;
+        this.direct = null;
+        if (at > 0) this.resumeTime = at;
+        await this.loadVideo(d.ref);
+        this.showNowPlaying(this.content?.title);
+        this.startHistoryTracking();
+    }
+
     /**
      * Play HLS stream using Hls.js
      */
@@ -795,6 +877,11 @@ class WatchPage {
         this.hls.on(Hls.Events.ERROR, (event, data) => {
             if (data.fatal) {
                 console.error('[WatchPage] HLS fatal error:', data);
+                // Straight from the user's provider (no CORS, gone...): server path
+                if (this.direct && this.direct.url === url) {
+                    this.directFailed(`HLS ${data.details}`);
+                    return;
+                }
                 // Try proxy on CORS error (only if not already proxied/transcoded)
                 // Note: Transcoded streams are local, so no CORS issues usually
                 if (!url.startsWith('/api/') && (data.type === Hls.ErrorTypes.NETWORK_ERROR)) {
@@ -824,6 +911,7 @@ class WatchPage {
         // Stop history tracking and save final progress
         this.stopHistoryTracking();
         this.saveProgress();
+        this.direct = null;
 
         // Cleanup transcode session if exists
         this.stopTranscodeSession();
@@ -1008,6 +1096,7 @@ class WatchPage {
     }
 
     onMetadataLoaded() {
+        this.checkDirect();
         // Detect resolution
         if (this.video && this.video.videoHeight > 0) {
             this.currentStreamInfo = {
@@ -1068,7 +1157,12 @@ class WatchPage {
         console.error('[WatchPage] Video error:', error.code, error.message);
         // Aborted = our own teardown; while hls.js drives the element it
         // recovers (or reports fatal) itself
-        if (error.code === MediaError.MEDIA_ERR_ABORTED || this.hls) return;
+        if (error.code === MediaError.MEDIA_ERR_ABORTED) return;
+        if (this.direct && !this.direct.failed) {
+            this.directFailed(`video error ${error.code}`);
+            return;
+        }
+        if (this.hls) return;
         this.scheduleRetry(`video error ${error.code}`);
     }
 
@@ -1840,7 +1934,9 @@ class WatchPage {
                 // Series-specific fields for next episode functionality
                 seriesId: this.content.seriesId || null,
                 currentSeason: this.currentSeason || null,
-                currentEpisode: this.currentEpisode || null
+                currentEpisode: this.currentEpisode || null,
+                // Played straight from the user's own provider (which stream)
+                direct: this.direct?.confirmed ? { providerId: this.direct.providerId, streamId: this.direct.streamId } : null
             };
 
             await window.API.request('POST', '/history', {

@@ -33,6 +33,15 @@ class App {
         // Check authentication first
         await this.checkAuth();
 
+        // Several profiles on this login: "Who's watching?" once per browser session
+        if (this.currentUser && await Profiles.pickIfNeeded(this)) return;
+
+        // No provider of their own yet: only the welcome form until one is added
+        if (this.currentUser?.needsProvider) {
+            this.showProviderGate();
+            return;
+        }
+
         // Mobile menu toggle
         const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
         const navbarMenu = document.getElementById('navbar-menu');
@@ -188,7 +197,146 @@ class App {
             this.navigateTo(initialPage, true); // true = replace history (don't add)
         }
 
+        // First provider just added on the welcome form: Profile, and sync it there
+        let syncId = null;
+        try {
+            syncId = sessionStorage.getItem('fleurbox_sync_provider');
+            sessionStorage.removeItem('fleurbox_sync_provider');
+        } catch { /* storage blocked: sync from Profile by hand */ }
+        if (syncId) {
+            this.pages.profile.pendingSync = parseInt(syncId, 10);
+            if (this.currentPage === 'profile') this.pages.profile.show();
+            else this.navigateTo('profile');
+        } else if (!playedRoute && !openedRoute) {
+            // Not over a shared #watch / #event link
+            this.maybeWelcome();
+        }
+
         console.log('Fleurbox initialized');
+    }
+
+    /**
+     * Admins without a provider of their own: point at Profile > Your provider,
+     * or keep using the default source. (Other accounts get showProviderGate.)
+     * Comes back on every visit until they have a provider; closing it only
+     * hides it for the rest of this tab's session.
+     */
+    async maybeWelcome() {
+        const user = this.currentUser;
+        if (!user || user.role !== 'admin') return;
+        const key = `fleurbox_welcome_${user.id}`;
+        try {
+            if (sessionStorage.getItem(key)) return;
+        } catch { /* storage blocked: shown on each load */ }
+        const providers = await DirectPlay.providers().catch(() => null);
+        if (!providers || providers.length) return;
+
+        const modal = document.getElementById('modal');
+        document.getElementById('modal-title').textContent = 'Welcome to Fleurbox!';
+        document.getElementById('modal-body').innerHTML = `
+            <p>To get started, add a new provider.</p>
+            <p class="hint">As an admin you can also keep using this server's default source.
+                You can add or change your provider any time on your Profile.</p>`;
+        document.getElementById('modal-footer').innerHTML = `
+            <button class="btn btn-secondary" id="welcome-later">Use default source</button>
+            <button class="btn btn-primary" id="welcome-add">Add provider</button>`;
+        const close = () => {
+            try { sessionStorage.setItem(key, '1'); } catch { /* storage blocked */ }
+            modal.classList.remove('active');
+            modal.onclick = null;
+        };
+        modal.querySelector('.modal-close').onclick = close;
+        modal.onclick = e => { if (e.target === modal) close(); };
+        document.getElementById('welcome-later').onclick = close;
+        document.getElementById('welcome-add').onclick = () => {
+            close();
+            const profile = this.pages.profile;
+            profile.providerForm = 'new';
+            profile.providerStatus.form = null;
+            if (this.currentPage === 'profile') profile.show();
+            else this.navigateTo('profile');
+        };
+        modal.classList.add('active');
+    }
+
+    /**
+     * Accounts without a provider of their own (not admins or kids profiles)
+     * can't use anything else - the server answers needsProvider. A welcome
+     * screen with the provider form; saving reloads into the app, which opens
+     * Profile and runs the first Sync.
+     */
+    showProviderGate() {
+        const gate = document.createElement('div');
+        gate.className = 'provider-gate';
+        // Only the main profile adds the login's provider (server/services/profiles.js)
+        if (!this.currentUser.isOwner) {
+            gate.innerHTML = `
+                <div class="provider-gate-card">
+                    <h2>Welcome to Fleurbox!</h2>
+                    <p>This login has no provider yet.</p>
+                    <p class="hint">The main profile adds one: switch to it to get started.</p>
+                    <div class="provider-gate-actions">
+                        <button type="button" class="btn btn-ghost" data-gate-logout>Log out</button>
+                        <button type="button" class="btn btn-primary" data-gate-switch>Switch profile</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(gate);
+            gate.querySelector('[data-gate-switch]').addEventListener('click', () => Profiles.open(this));
+            gate.querySelector('[data-gate-logout]').addEventListener('click', () => document.getElementById('logout-btn')?.click());
+            return;
+        }
+        gate.innerHTML = `
+            <form class="provider-gate-card" autocomplete="off">
+                <h2>Welcome to Fleurbox!</h2>
+                <p>To get started, add a new provider.</p>
+                <p class="hint">Enter the Xtream login from your IPTV provider. It is stored encrypted,
+                    and what you open plays straight from your provider.</p>
+                <div class="form-group">
+                    <label>Name</label>
+                    <input class="form-input" name="name" maxlength="60" placeholder="My provider">
+                </div>
+                <div class="form-group">
+                    <label>Server address</label>
+                    <input class="form-input" name="url" required placeholder="http://example.com:8080" inputmode="url" autocapitalize="off" spellcheck="false">
+                </div>
+                <div class="form-group">
+                    <label>Username</label>
+                    <input class="form-input" name="username" required autocomplete="off" autocapitalize="off" spellcheck="false">
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input class="form-input" name="password" type="password" required autocomplete="new-password">
+                </div>
+                <p class="hint provider-gate-error" style="display: none"></p>
+                <div class="provider-gate-actions">
+                    <button type="button" class="btn btn-ghost" data-gate-logout>Log out</button>
+                    <button type="submit" class="btn btn-primary">Add provider</button>
+                </div>
+            </form>`;
+        document.body.appendChild(gate);
+
+        const form = gate.querySelector('form');
+        const error = gate.querySelector('.provider-gate-error');
+        form.addEventListener('submit', async e => {
+            e.preventDefault();
+            const button = form.querySelector('[type="submit"]');
+            button.disabled = true;
+            error.style.display = 'none';
+            try {
+                const saved = await API.request('POST', '/direct/providers', Object.fromEntries(new FormData(form).entries()));
+                try { sessionStorage.setItem('fleurbox_sync_provider', String(saved.id)); } catch { /* storage blocked */ }
+                window.location.reload();
+            } catch (err) {
+                error.textContent = err.message;
+                error.style.display = '';
+                button.disabled = false;
+            }
+        });
+        gate.querySelector('[data-gate-logout]').addEventListener('click', async () => {
+            Profiles.forget();
+            await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+            window.location.replace('/login.html');
+        });
     }
 
     async checkAuth() {
@@ -214,7 +362,8 @@ class App {
                 }
             }
 
-            // Add logout button to navbar
+            // Switch profile + logout buttons in the navbar
+            this.addProfileButton();
             this.addLogoutButton();
 
             // This user's saved appearance (Profile page); not awaited
@@ -224,6 +373,32 @@ class App {
             console.error('Authentication error:', err);
             window.location.replace('/login.html');
         }
+    }
+
+    /** Navbar: "Switch profile" (components/Profiles.js), before Logout */
+    addProfileButton() {
+        const navbar = document.querySelector('.navbar-menu');
+        if (!navbar || document.getElementById('profile-switch-btn')) return;
+
+        const link = document.createElement('a');
+        link.href = '#';
+        link.className = 'nav-link';
+        link.id = 'profile-switch-btn';
+        link.innerHTML = `
+            <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="icon">
+                <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+            </svg></span>
+            <span>Switch profile</span>
+        `;
+        // Added before the page links are wired up: keep their navigateTo off it
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            document.getElementById('mobile-menu-toggle')?.classList.remove('active');
+            document.getElementById('navbar-menu')?.classList.remove('active');
+            Profiles.open(this).catch(err => console.error('[Profiles] Unavailable:', err));
+        });
+        navbar.appendChild(link);
     }
 
     addLogoutButton() {
@@ -244,6 +419,7 @@ class App {
         logoutLink.addEventListener('click', async (e) => {
             e.preventDefault();
 
+            Profiles.forget();
             await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
             window.location.replace('/login.html');
         });

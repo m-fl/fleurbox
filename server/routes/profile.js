@@ -70,8 +70,8 @@ function getPreferences(userId) {
 /** GET /api/profile -> { user: { id, username, role }, appearance, preferences } */
 router.get('/', (req, res) => {
     try {
-        const { id, username, role } = req.user;
-        res.json({ user: { id, username, role }, appearance: APPEARANCE, preferences: getPreferences(id) });
+        const { id, username, name, role, isOwner } = req.user;
+        res.json({ user: { id, username, name, role, isOwner, kids: !!req.user.kids }, appearance: APPEARANCE, preferences: getPreferences(id) });
     } catch (err) {
         console.error('[Profile] Load failed:', err);
         res.status(500).json({ error: 'Failed to load profile' });

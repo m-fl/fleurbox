@@ -622,6 +622,15 @@ class VideoPlayer {
         // Setup custom video controls
         this.initCustomControls();
 
+        // Direct play from the user's provider: confirm it, or fall back on errors
+        this.video.addEventListener('loadedmetadata', () => this.checkDirect());
+        this.video.addEventListener('error', () => {
+            const error = this.video.error;
+            if (this.direct && !this.direct.failed && error && error.code !== MediaError.MEDIA_ERR_ABORTED) {
+                this.directFailed(`video error ${error.code}`);
+            }
+        });
+
         // Detect video resolution when metadata loads (works for all streams)
         this.video.addEventListener('loadedmetadata', () => {
             if (this.video.videoHeight > 0) {
@@ -881,6 +890,18 @@ class VideoPlayer {
             // Determine if HLS or direct stream
             this.currentUrl = streamUrl;
             this.sourceUrl = streamUrl; // the stream reference, kept when currentUrl becomes a transcode/remux URL
+
+            // The user's own provider (js/directPlay.js): straight to this browser
+            // when it can play the stream, else the server path on their login
+            const seq = this.playSeq = (this.playSeq || 0) + 1;
+            const direct = await this.findDirect(channel, streamUrl);
+            if (seq !== this.playSeq) return; // another channel was picked meanwhile
+            if (direct) {
+                if (this.playDirect(channel, direct)) return;
+                streamUrl = direct.ref;
+                this.currentUrl = streamUrl;
+                this.sourceUrl = streamUrl;
+            }
 
             // CHECK: Auto Transcode (Smart) - probe first, then decide
             if (this.settings.autoTranscode) {
@@ -1199,6 +1220,82 @@ class VideoPlayer {
         }
     }
 
+    /** The user's own stream for this channel (GET /api/direct/resolve), or null */
+    async findDirect(channel, streamUrl) {
+        if (!window.DirectPlay || channel?.sourceType !== 'xtream' || !channel.streamId ||
+            String(streamUrl).startsWith('/api/stream/u/')) return null;
+        return DirectPlay.resolve({ type: 'live', sourceId: channel.sourceId, itemId: channel.streamId });
+    }
+
+    /**
+     * Play `direct` from the provider in this browser, unless a setting asks
+     * for the server or the browser can't. Returns false to use the server path.
+     */
+    playDirect(channel, direct) {
+        const s = this.settings;
+        if (s.forceTranscode || s.forceVideoTranscode || s.forceProxy || s.upscaleEnabled) return false;
+        const mode = DirectPlay.mode(direct, this.video);
+        if (!mode) return false;
+
+        console.log(`[Player] Direct play from your provider (${mode}, matched by ${direct.match})`);
+        this.direct = { ...direct, mode, confirmed: false, channel };
+        this.currentUrl = direct.ref;
+        this.sourceUrl = direct.ref; // "Copy Stream URL": the server path on the user's login
+        this.updateTranscodeStatus('direct', 'Direct (your provider)');
+
+        if (mode === 'hls') {
+            this.hls = new Hls(this.getHlsConfig());
+            this.hls.loadSource(direct.url);
+            this.hls.attachMedia(this.video);
+            this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                this.video.play().catch(e => {
+                    if (e.name !== 'AbortError') console.log('Autoplay prevented:', e);
+                });
+            });
+            this.hls.on(Hls.Events.ERROR, (event, data) => {
+                if (!data.fatal) return;
+                const now = Date.now();
+                if (data.type === Hls.ErrorTypes.MEDIA_ERROR && now - (this.lastRecoveryAttempt || 0) > 2000) {
+                    this.lastRecoveryAttempt = now;
+                    this.hls.recoverMediaError();
+                    return;
+                }
+                this.directFailed(`HLS ${data.details}`);
+            });
+        } else {
+            this.video.src = direct.url;
+            this.video.play().catch(e => {
+                if (e.name !== 'AbortError') console.log('Autoplay prevented:', e);
+            });
+        }
+
+        this.updateNowPlaying(channel);
+        this.showNowPlayingOverlay();
+        this.fetchEpgData(channel);
+        window.dispatchEvent(new CustomEvent('channelChanged', { detail: channel }));
+        return true;
+    }
+
+    /** Picture arrived on a direct play: report it; no picture: fall back */
+    checkDirect() {
+        const d = this.direct;
+        if (!d || d.confirmed || d.failed) return;
+        if (this.video.videoWidth === 0) return this.directFailed('no picture (video codec)');
+        d.confirmed = true;
+        DirectPlay.reportProbe(d, true, { width: this.video.videoWidth, height: this.video.videoHeight, mode: d.mode });
+    }
+
+    /** Direct play failed: remember it, then play the channel through the server on the user's login */
+    directFailed(reason) {
+        const d = this.direct;
+        if (!d || d.failed) return;
+        d.failed = true;
+        console.warn(`[Player] Direct play failed (${reason}) - using the server`);
+        DirectPlay.reportProbe(d, false, { error: reason, mode: d.mode });
+        this.direct = null;
+        this.play(d.channel, d.ref);
+    }
+
     /**
      * Helper to play HLS stream (reduces duplication)
      */
@@ -1423,6 +1520,7 @@ class VideoPlayer {
      */
     stop() {
         window.app?.clearNowPlaying?.('live');
+        this.direct = null;
         // Stop any running transcode session first
         this.stopTranscodeSession();
 

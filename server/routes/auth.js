@@ -286,9 +286,14 @@ router.get('/me', auth.requireAuth, async (req, res) => {
         res.json({
             id: user.id,
             username: user.username,
+            name: req.user.name,
             role: user.role,
             kids: !!user.kids,
-            maxMaturity: maturity.limitFor(user)
+            maxMaturity: maturity.limitFor(user),
+            // profiles (services/profiles.js)
+            accountId: req.user.accountId,
+            isOwner: req.user.isOwner,
+            needsProvider: !require('../services/directPlay').mayUseServerSources(req.user)
         });
     } catch (err) {
         console.error('Error in /me:', err);
@@ -304,9 +309,10 @@ router.get('/users', auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
         const allUsers = await db.users.getAll();
 
-        // Remove password hashes
-        const users = allUsers.map(u => {
-            const { passwordHash, ...userWithoutPassword } = u;
+        // Logins only (profiles are managed on their login's Profile page);
+        // no password or PIN hashes
+        const users = allUsers.filter(u => !u.parentId).map(u => {
+            const { passwordHash, pinHash, ...userWithoutPassword } = u;
             return userWithoutPassword;
         });
 
@@ -434,11 +440,43 @@ router.delete('/users/:id', auth.requireAuth, auth.requireAdmin, async (req, res
         }
 
         await db.users.delete(id);
+        require('../services/directPlay').deleteForUser(parseInt(id, 10));
+        await require('../services/profiles').removeForAccount(parseInt(id, 10));
         res.json({ success: true, message: 'User deleted successfully' });
     } catch (err) {
         console.error('Error deleting user:', err);
         res.status(500).json({ error: err.message || 'Server error' });
     }
 });
+
+// ===================== Profiles (services/profiles.js) =====================
+//   GET    /api/auth/profiles               { isOwner, max, avatars, profiles: [...] }
+//   POST   /api/auth/profiles               { name, avatar?, kids?, maxMaturity?, allowedChannels?, pin? } (main profile)
+//   PUT    /api/auth/profiles/:id           same fields; pin null = no PIN                (main profile)
+//   DELETE /api/auth/profiles/:id                                                         (main profile)
+//   POST   /api/auth/profiles/:id/switch    { pin? } this browser becomes that profile
+
+const profiles = require('../services/profiles');
+const profileRoute = fn => async (req, res) => {
+    try {
+        res.json(await fn(req, res));
+    } catch (err) {
+        if (!err.status) console.error('[Profiles]', err);
+        res.status(err.status || 500).json({ error: err.status ? err.message : 'Server error' });
+    }
+};
+
+router.get('/profiles', auth.requireAuth, profileRoute(req => profiles.list(req.user)));
+router.post('/profiles', auth.requireAuth, profileRoute(req => profiles.create(req.user, req.body || {})));
+router.put('/profiles/:id', auth.requireAuth, profileRoute(req => profiles.update(req.user, req.params.id, req.body || {})));
+router.delete('/profiles/:id', auth.requireAuth, profileRoute(req => profiles.remove(req.user, req.params.id)));
+router.post('/profiles/:id/switch', auth.requireAuth, profileRoute(async (req, res) => {
+    const { user, account } = await profiles.checkSwitch(req.user, req.params.id, req.body?.pin);
+    // The old profile's token stops working: one profile per browser at a time
+    const old = auth.verifyToken(auth.tokenFromRequest(req));
+    if (old?.jti) await db.revokedTokens.add(old.jti, old.exp).catch(err => console.error('Error revoking token:', err));
+    auth.setAuthCookie(req, res, auth.generateToken(user, account));
+    return { success: true, id: user.id };
+}));
 
 module.exports = router;

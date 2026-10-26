@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const { Strategy: JwtStrategy, ExtractJwt } = require('passport-jwt');
 const { Strategy: LocalStrategy } = require('passport-local');
+const { sessionUser } = require('./services/profiles');
 
 /**
  * Authentication and Authorization Module
@@ -50,9 +51,10 @@ async function verifyPassword(password, hash) {
 }
 
 /**
- * Generate JWT token
+ * Generate JWT token. For a profile (services/profiles.js) pass its account:
+ * atv ties the token to the login, so a new password ends the profiles too.
  */
-function generateToken(user) {
+function generateToken(user, account = null) {
     return jwt.sign(
         {
             id: user.id,
@@ -61,7 +63,8 @@ function generateToken(user) {
             // jti: this token, so logout can revoke it; tv: bumped on password /
             // role change, which ends every older token of the user
             jti: crypto.randomUUID(),
-            tv: user.tokenVersion || 0
+            tv: user.tokenVersion || 0,
+            ...(user.parentId ? { atv: account?.tokenVersion || 0 } : {})
         },
         JWT_SECRET,
         { expiresIn: JWT_EXPIRY }
@@ -153,18 +156,13 @@ function configureJwtStrategy(getUserById, isRevoked) {
             if (!user || (payload.tv || 0) !== (user.tokenVersion || 0) || await isRevoked(payload.jti)) {
                 return done(null, false);
             }
+            // A profile works while its login does
+            const parent = user.parentId ? await getUserById(user.parentId) : null;
+            if (user.parentId && (!parent || (payload.atv || 0) !== (parent.tokenVersion || 0))) {
+                return done(null, false);
+            }
 
-            return done(null, {
-                id: user.id,
-                username: user.username,
-                role: user.role,
-                // signs stream links (services/streamRef.js), so they end with the logins
-                tokenVersion: user.tokenVersion || 0,
-                // kids accounts (services/maturity.js)
-                kids: !!user.kids,
-                maxMaturity: user.maxMaturity ?? null,
-                allowedChannels: user.allowedChannels || []
-            });
+            return done(null, sessionUser(user, parent));
         } catch (err) {
             return done(err, false);
         }
