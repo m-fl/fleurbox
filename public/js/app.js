@@ -33,6 +33,9 @@ class App {
         // Check authentication first
         await this.checkAuth();
 
+        // Progress saved while the login had expired (js/api.js Session)
+        if (this.currentUser) Session.flushPendingHistory();
+
         // Several profiles on this login: "Who's watching?" once per browser session
         if (this.currentUser && await Profiles.pickIfNeeded(this)) return;
 

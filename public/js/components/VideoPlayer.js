@@ -29,6 +29,21 @@ class VideoPlayer {
         this.currentUrl = null;
         this.settingsLoaded = false;
 
+        // Playback recovery (js/playbackRetry.js): a failed channel is played
+        // again from scratch (probe, session) with back-off, then a Retry button
+        this.playArgs = null;
+        this.retry = new PlaybackRetry({
+            name: 'Player',
+            container: this.container,
+            run: () => this.replay(),
+            onWait: () => this.loadingSpinner?.classList.add('show'),
+            onGiveUp: () => this.loadingSpinner?.classList.remove('show')
+        });
+        window.addEventListener('fleurbox:session-expired', () => {
+            this.retry.cancel();
+            this.loadingSpinner?.classList.remove('show');
+        });
+
         // Settings - start with defaults, load from server async
         this.settings = this.getDefaultSettings();
 
@@ -626,10 +641,16 @@ class VideoPlayer {
         this.video.addEventListener('loadedmetadata', () => this.checkDirect());
         this.video.addEventListener('error', () => {
             const error = this.video.error;
-            if (this.direct && !this.direct.failed && error && error.code !== MediaError.MEDIA_ERR_ABORTED) {
+            if (!error || error.code === MediaError.MEDIA_ERR_ABORTED) return;
+            if (this.direct && !this.direct.failed) {
                 this.directFailed(`video error ${error.code}`);
+                return;
             }
+            // hls.js reports its own failures (ERROR events)
+            if (!this.hls && this.currentChannel) this.playbackFailed(`video error ${error.code}`);
         });
+        // Playing steadily again: a later failure gets fresh retries
+        this.video.addEventListener('playing', () => this.retry.playing());
 
         // Detect video resolution when metadata loads (works for all streams)
         this.video.addEventListener('loadedmetadata', () => {
@@ -651,49 +672,13 @@ class VideoPlayer {
                 console.error('HLS error:', data.type, data.details);
                 if (data.fatal) {
                     switch (data.type) {
-                        case Hls.ErrorTypes.NETWORK_ERROR:
-                            // Track network retry attempts
-                            this.networkRetryCount = (this.networkRetryCount || 0) + 1;
-                            const now = Date.now();
-                            const timeSinceLastNetworkError = now - (this.lastNetworkErrorTime || 0);
-                            this.lastNetworkErrorTime = now;
-
-                            // Reset retry count if it's been more than 30 seconds since last error
-                            if (timeSinceLastNetworkError > 30000) {
-                                this.networkRetryCount = 1;
-                            }
-
-                            console.log(`Network error (attempt ${this.networkRetryCount}/3):`, data.details);
-
-                            if (this.networkRetryCount <= 3 && !this.isUsingProxy) {
-                                // Retry with increasing delay (1s, 2s, 3s)
-                                const retryDelay = this.networkRetryCount * 1000;
-                                console.log(`[HLS] Retrying in ${retryDelay}ms...`);
-                                setTimeout(() => {
-                                    if (this.hls) {
-                                        this.hls.startLoad();
-                                    }
-                                }, retryDelay);
-                            } else if (!this.isUsingProxy) {
-                                // After 3 retries, try proxy
-                                console.log('[HLS] Max retries reached, switching to proxy...');
-                                this.networkRetryCount = 0;
-                                this.isUsingProxy = true;
-                                const proxiedUrl = this.getProxiedUrl(this.currentUrl);
-                                this.hls.loadSource(proxiedUrl);
-                                this.hls.startLoad();
-                            } else {
-                                // Already using proxy, just retry
-                                console.log('[HLS] Network error on proxy, retrying...');
-                                this.hls.startLoad();
-                            }
-                            break;
                         case Hls.ErrorTypes.MEDIA_ERROR:
                             console.log('Media error, attempting recovery...');
                             this.hls.recoverMediaError();
                             break;
                         default:
-                            this.stop();
+                            // hls.js already retried the request itself (getHlsConfig)
+                            this.playbackFailed(`HLS ${data.details}`);
                             break;
                     }
                 } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
@@ -838,6 +823,10 @@ class VideoPlayer {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, ...options })
             });
+            if (res.status === 401) {
+                Session.expire();
+                return null;
+            }
             if (!res.ok) throw new Error('Failed to start session');
             const session = await res.json();
             this.currentSessionId = session.sessionId;
@@ -868,15 +857,16 @@ class VideoPlayer {
     /**
      * Play a channel
      */
-    async play(channel, streamUrl) {
+    async play(channel, streamUrl, { isRetry = false } = {}) {
         this.currentChannel = channel;
+        this.playArgs = { channel, streamUrl };
 
         try {
             // Stop any WatchPage playback (movies/series) before starting Live TV
             window.app?.pages?.watch?.stop?.();
 
-            // Stop current playback
-            this.stop();
+            // Stop current playback (a retry keeps its attempt count)
+            this.stop({ keepRetry: isRetry });
             this.updateTranscodeStatus('hidden');
             window.app?.setNowPlaying?.(channel?.name, 'live');
 
@@ -954,6 +944,7 @@ class VideoPlayer {
                             audioCodec: info.audio,
                             audioChannels: info.audioChannels
                         });
+                        if (!playlistUrl) return; // logged out
                         this.currentUrl = playlistUrl; // Update currentUrl for HLS reload
 
                         this.playHls(playlistUrl);
@@ -994,6 +985,7 @@ class VideoPlayer {
                 console.log(`[Player] ${statusText} enabled. Starting session (encode)...`);
                 this.updateTranscodeStatus(statusMode, statusText);
                 const playlistUrl = await this.startTranscodeSession(streamUrl, { videoMode: 'encode' });
+                if (!playlistUrl) return; // logged out
                 this.currentUrl = playlistUrl;
 
                 // Load HLS
@@ -1023,7 +1015,7 @@ class VideoPlayer {
                     this.hls.on(Hls.Events.ERROR, (event, data) => {
                         if (data.fatal) {
                             console.log('[Player] HLS fatal error');
-                            this.hls.destroy();
+                            this.playbackFailed(`HLS ${data.details}`);
                         }
                     });
 
@@ -1045,6 +1037,7 @@ class VideoPlayer {
                 } catch (e) { console.warn('Probe failed for force audio, assuming h264'); }
 
                 const playlistUrl = await this.startTranscodeSession(streamUrl, { videoMode: 'copy', videoCodec });
+                if (!playlistUrl) return; // logged out
                 this.currentUrl = playlistUrl;
 
                 console.log('[Player] Playing transcoded HLS stream:', playlistUrl);
@@ -1157,6 +1150,7 @@ class VideoPlayer {
                             }
                         } else {
                             console.error('Fatal HLS error:', data);
+                            this.playbackFailed(`HLS ${data.details}`);
                         }
                     } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
                         // Non-fatal media error - already handled in init(), skip duplicate handling
@@ -1318,7 +1312,7 @@ class VideoPlayer {
             if (data.fatal) {
                 // Simple error handling for forced HLS/transcode modes
                 console.error('Fatal HLS error in transcode mode:', data);
-                this.hls.destroy();
+                this.playbackFailed(`HLS ${data.details}`);
             }
         });
     }
@@ -1516,9 +1510,33 @@ class VideoPlayer {
     }
 
     /**
+     * The stream failed and hls.js / the element gave up: drop it and play
+     * the channel again later (PlaybackRetry: back-off, offline/hidden wait,
+     * login check, then a Retry button)
+     */
+    playbackFailed(reason) {
+        if (!this.playArgs) return;
+        if (this.hls) {
+            this.hls.destroy();
+            this.hls = null;
+        }
+        const ch = this.playArgs.channel;
+        this.retry.schedule(reason, ch ? `${ch.sourceId}:${ch.id}` : this.playArgs.streamUrl);
+    }
+
+    /** Play the current channel again from scratch (PlaybackRetry) */
+    replay() {
+        if (!this.playArgs) return;
+        const { channel, streamUrl } = this.playArgs;
+        this.play(channel, streamUrl, { isRetry: true });
+    }
+
+    /**
      * Stop playback
      */
-    stop() {
+    stop({ keepRetry = false } = {}) {
+        if (keepRetry) this.retry.cancel();
+        else this.retry.reset();
         window.app?.clearNowPlaying?.('live');
         this.direct = null;
         // Stop any running transcode session first

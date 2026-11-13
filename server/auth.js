@@ -20,13 +20,21 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) {
     console.error('  echo "JWT_SECRET=$(openssl rand -hex 32)" >> .env');
     process.exit(1);
 }
-const JWT_EXPIRY = '24h';
+// Sliding session: a login lasts SESSION_DAYS from the last time it was
+// used. A cookie token older than RENEW_AFTER_S is swapped for a fresh one
+// on the next authenticated request (requireAuth), so an active browser
+// never reaches the expiry. Logout / password change / tokenVersion still
+// end it: every renewed token keeps the session's `sid`, and logout revokes
+// that sid, not only the one token.
+const SESSION_DAYS = 30;
+const JWT_EXPIRY = `${SESSION_DAYS}d`;
+const RENEW_AFTER_S = 60 * 60;
 
 // The JWT is also carried in an httpOnly cookie so that requests the browser
 // makes on its own (<img>, <video>, HLS segments) authenticate too - they
 // cannot send an Authorization header.
 const AUTH_COOKIE = 'nodecast_token';
-const AUTH_COOKIE_MAX_AGE = 24 * 60 * 60 * 1000; // matches JWT_EXPIRY
+const AUTH_COOKIE_MAX_AGE = SESSION_DAYS * 24 * 60 * 60 * 1000; // matches JWT_EXPIRY
 
 // Minimum length for new passwords (setup, user create/update)
 const MIN_PASSWORD_LENGTH = 10;
@@ -63,12 +71,40 @@ function generateToken(user, account = null) {
             // jti: this token, so logout can revoke it; tv: bumped on password /
             // role change, which ends every older token of the user
             jti: crypto.randomUUID(),
+            // sid: the login session, kept by every renewal (renewToken)
+            sid: crypto.randomUUID(),
             tv: user.tokenVersion || 0,
             ...(user.parentId ? { atv: account?.tokenVersion || 0 } : {})
         },
         JWT_SECRET,
         { expiresIn: JWT_EXPIRY }
     );
+}
+
+/**
+ * A fresh token for the same session: same claims and sid, new jti and
+ * expiry. The old token is not revoked - requests already in flight with it
+ * (HLS segments, parallel API calls) must not turn into a logout.
+ */
+function renewToken(payload) {
+    const { iat, exp, nbf, jti, ...claims } = payload;
+    return jwt.sign(
+        { ...claims, jti: crypto.randomUUID(), sid: payload.sid || jti },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRY }
+    );
+}
+
+/**
+ * Revoke a token and its whole session (every renewal of it). The sid entry
+ * is kept until the newest possible token of the session would expire.
+ */
+async function revokeSession(payload, revokedTokens) {
+    if (!payload) return;
+    if (payload.jti) await revokedTokens.add(payload.jti, payload.exp);
+    if (payload.sid) {
+        await revokedTokens.add(`sid:${payload.sid}`, Math.floor(Date.now() / 1000) + SESSION_DAYS * 24 * 60 * 60);
+    }
 }
 
 /**
@@ -153,7 +189,10 @@ function configureJwtStrategy(getUserById, isRevoked) {
         try {
             const user = await getUserById(payload.id);
 
-            if (!user || (payload.tv || 0) !== (user.tokenVersion || 0) || await isRevoked(payload.jti)) {
+            // A token from before sids is its own session's start: renewals
+            // of it carry sid = its jti (renewToken)
+            if (!user || (payload.tv || 0) !== (user.tokenVersion || 0) || await isRevoked(payload.jti) ||
+                await isRevoked(`sid:${payload.sid || payload.jti}`)) {
                 return done(null, false);
             }
             // A profile works while its login does
@@ -293,9 +332,27 @@ function configureOidcStrategy(findUserByOidcId, findUserByEmail, createUser) {
 }
 
 /**
- * Middleware: Require authentication using Passport JWT
+ * Middleware: Require authentication using Passport JWT. A cookie login
+ * older than RENEW_AFTER_S gets a renewed cookie (sliding session); Bearer
+ * tokens (curl, scripts) are left alone.
  */
-const requireAuth = passport.authenticate('jwt', { session: false });
+const authenticateJwt = passport.authenticate('jwt', { session: false });
+function requireAuth(req, res, next) {
+    authenticateJwt(req, res, (err) => {
+        if (err) return next(err);
+        try {
+            const bearer = /^Bearer /.test(req.headers.authorization || '');
+            const token = !bearer && tokenFromCookie(req);
+            const payload = token && jwt.decode(token);
+            if (payload?.iat && Date.now() / 1000 - payload.iat > RENEW_AFTER_S && !res.headersSent) {
+                setAuthCookie(req, res, renewToken(payload));
+            }
+        } catch (e) {
+            console.error('[Auth] Session renewal failed:', e.message);
+        }
+        next();
+    });
+}
 
 /**
  * Middleware: Require admin role
@@ -324,6 +381,8 @@ module.exports = {
     hashPassword,
     verifyPassword,
     generateToken,
+    renewToken,
+    revokeSession,
     verifyToken,
     configureLocalStrategy,
     configureJwtStrategy,

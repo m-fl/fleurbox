@@ -150,6 +150,7 @@ function analyzeProbeResult(probeResult, url) {
         width: videoStream?.width || 0,
         height: videoStream?.height || 0,
         audioChannels: audioStream?.channels || 0, // For Smart Audio Copy
+        duration: parseFloat(format.duration) || 0, // Whole title, seconds (0 = unknown/live)
         container: container,
         compatible: compatible,
         needsRemux: needsRemux,

@@ -107,13 +107,31 @@ class WatchPage {
         // Watch history
         this.historyInterval = null;
 
+        // A transcode session started at seekOffset plays from there, so the
+        // video element's clock is streamOffset behind the title's.
+        // mediaDuration is the whole title's length from the probe (0 = unknown).
+        this.streamOffset = 0;
+        this.mediaDuration = 0;
+        this.seekRestartTimer = null;
+
         // Playback recovery: every loadVideo()/stop() bumps loadSeq, so a load
         // that is still awaiting (probe, session start) when a newer one starts
         // gives up instead of attaching its stream on top
         this.loadSeq = 0;
-        this.retryCount = 0;
-        this.retryTimer = null;
-        this.retryResetTimer = null;
+        // Retries with back-off, waiting while offline/hidden (js/playbackRetry.js)
+        this.retryResumeAt = 0;
+        this.retry = new PlaybackRetry({
+            name: 'WatchPage',
+            container: document.querySelector('.watch-video-section'),
+            run: () => {
+                if (this.retryResumeAt > 0) this.resumeTime = this.retryResumeAt;
+                this.reload();
+            },
+            onWait: () => this.showLoading(),
+            onGiveUp: () => this.hideLoading()
+        });
+        // Logged out mid-title: keep the place for after the login
+        window.addEventListener('fleurbox:session-expired', () => this.onSessionExpired());
 
         this.init();
     }
@@ -211,10 +229,7 @@ class WatchPage {
         this.video?.addEventListener('ended', () => this.onEnded());
         this.video?.addEventListener('error', (e) => this.onError(e));
         // Playing steadily for a while: a later failure gets fresh retries
-        this.video?.addEventListener('playing', () => {
-            clearTimeout(this.retryResetTimer);
-            this.retryResetTimer = setTimeout(() => { this.retryCount = 0; }, 15000);
-        });
+        this.video?.addEventListener('playing', () => this.retry.playing());
         this.video?.addEventListener('waiting', () => this.showLoading());
         this.video?.addEventListener('canplay', () => this.hideLoading());
 
@@ -464,6 +479,7 @@ class WatchPage {
      */
     async startTranscodeSession(url, options = {}) {
         const seq = this.loadSeq;
+        const seekOffset = options.seekOffset ?? this.resumeTime ?? 0;
         try {
             console.log('[WatchPage] Starting HLS transcode session...', options);
             const res = await fetch('/api/transcode/session', {
@@ -475,6 +491,11 @@ class WatchPage {
                     ...options
                 })
             });
+            if (res.status === 401) {
+                this.loadSeq++; // callers see this load as superseded and stop
+                Session.expire();
+                return null;
+            }
             if (!res.ok) throw new Error('Failed to start session');
             const session = await res.json();
             if (seq !== this.loadSeq) {
@@ -483,6 +504,9 @@ class WatchPage {
                 return null;
             }
             this.currentSessionId = session.sessionId;
+            // The server already started at the resume point: don't seek again
+            this.streamOffset = seekOffset > 0 ? seekOffset : 0;
+            if (this.streamOffset) this.resumeTime = 0;
             return session.playlistUrl;
         } catch (err) {
             console.error('[WatchPage] Session start failed:', err);
@@ -605,6 +629,7 @@ class WatchPage {
 
                 // Store early probe info for quality display
                 this.currentStreamInfo = info;
+                this.mediaDuration = info.duration || 0;
                 this.updateQualityBadge();
 
                 // Populate the audio track selector
@@ -703,6 +728,7 @@ class WatchPage {
                 const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(url)}&ua=${encodeURIComponent(ua || '')}`);
                 const info = await probeRes.json();
                 videoCodec = info.video;
+                this.mediaDuration = info.duration || 0;
             } catch (e) { console.warn('Probe failed for force audio, assuming h264'); }
             if (superseded()) return;
 
@@ -904,14 +930,17 @@ class WatchPage {
 
     stop({ keepRetries = false } = {}) {
         this.loadSeq++;
-        clearTimeout(this.retryTimer);
-        this.retryTimer = null;
-        if (!keepRetries) this.retryCount = 0;
+        if (keepRetries) this.retry.cancel();
+        else this.retry.reset();
 
         // Stop history tracking and save final progress
         this.stopHistoryTracking();
         this.saveProgress();
         this.direct = null;
+        this.streamOffset = 0;
+        this.mediaDuration = 0;
+        clearTimeout(this.seekRestartTimer);
+        this.seekRestartTimer = null;
 
         // Cleanup transcode session if exists
         this.stopTranscodeSession();
@@ -949,15 +978,50 @@ class WatchPage {
     }
 
     skip(seconds) {
-        if (this.video) {
-            this.video.currentTime = Math.max(0, Math.min(this.video.currentTime + seconds, this.video.duration || 0));
-        }
+        if (this.video) this.seekTo(this.position() + seconds);
     }
 
     seek(percent) {
-        if (this.video && this.video.duration) {
-            this.video.currentTime = (percent / 100) * this.video.duration;
+        const total = this.totalDuration();
+        if (this.video && total) this.seekTo((percent / 100) * total);
+    }
+
+    /** Position in the title, in seconds (see streamOffset) */
+    position() {
+        return this.streamOffset + (this.video?.currentTime || 0);
+    }
+
+    /** Length of the title, in seconds (0 = unknown) */
+    totalDuration() {
+        if (this.mediaDuration) return this.mediaDuration;
+        const d = this.video?.duration;
+        return Number.isFinite(d) && d > 0 ? this.streamOffset + d : 0;
+    }
+
+    /**
+     * Seek to a time in the title. A transcode session only has what FFmpeg
+     * has produced since its start, so a target outside that restarts the
+     * session there (debounced: dragging the slider fires many inputs).
+     */
+    seekTo(t) {
+        const total = this.totalDuration();
+        t = Math.max(0, total ? Math.min(t, total) : t);
+        const local = t - this.streamOffset;
+        const available = Number.isFinite(this.video.duration) ? this.video.duration : 0;
+        clearTimeout(this.seekRestartTimer);
+        this.seekRestartTimer = null;
+        if (!this.currentSessionId || (local >= 0 && local <= available)) {
+            this.video.currentTime = Math.max(0, local);
+            return;
         }
+        const seq = this.loadSeq;
+        this.seekRestartTimer = setTimeout(() => {
+            this.seekRestartTimer = null;
+            if (seq !== this.loadSeq) return;
+            console.log(`[WatchPage] Seek to ${Math.round(t)}s is outside the session, restarting there`);
+            this.resumeTime = t;
+            this.reload();
+        }, 400);
     }
 
     toggleMute() {
@@ -1066,18 +1130,20 @@ class WatchPage {
     // === UI Updates ===
 
     updateProgress() {
-        if (!this.video || !this.video.duration) return;
+        const total = this.totalDuration();
+        if (!this.video || !total) return;
+        if (this.seekRestartTimer) return; // keep the slider where it was dropped
 
-        const percent = (this.video.currentTime / this.video.duration) * 100;
+        const percent = (this.position() / total) * 100;
         this.progressSlider.value = percent;
-        this.timeCurrent.textContent = this.formatTime(this.video.currentTime);
+        this.timeCurrent.textContent = this.formatTime(this.position());
 
         // Show "Up Next" panel early for series (like streaming services do during credits)
         // Only show if auto-play next episode is enabled
         const autoPlayEnabled = this.app?.player?.settings?.autoPlayNextEpisode;
         if (autoPlayEnabled && this.contentType === 'series' && this.seriesInfo && !this.nextEpisodeShowing && !this.nextEpisodeDismissed) {
-            const duration = this.video.duration;
-            const currentTime = this.video.currentTime;
+            const duration = total;
+            const currentTime = this.position();
 
             // Only proceed if we have reliable duration data
             if (isFinite(duration) && duration >= 180 && currentTime >= 120) {
@@ -1172,26 +1238,37 @@ class WatchPage {
      * player that only a page refresh brings back
      */
     scheduleRetry(reason) {
-        const MAX_RETRIES = 3;
-        if (!this.currentUrl || this.retryTimer) return;
-        clearTimeout(this.retryResetTimer);
-        if (this.retryCount >= MAX_RETRIES) {
-            console.error(`[WatchPage] Playback failed after ${MAX_RETRIES} retries (${reason})`);
-            this.hideLoading();
-            return;
+        if (!this.currentUrl) return;
+        const key = this.retryKey();
+        if (key !== this.retry.key) this.retryResumeAt = 0; // another title
+        // Where it stopped (a failed retry has position 0: keep the first one)
+        const pos = this.position();
+        if (pos > 0) this.retryResumeAt = pos;
+        this.retry.schedule(reason, key);
+    }
+
+    /** Retries count per title/episode */
+    retryKey() {
+        return this.content ? `${this.content.type}:${this.content.id}` : this.currentUrl;
+    }
+
+    /**
+     * The login ended (js/api.js Session): stop retrying, pause, and keep the
+     * position in localStorage - Session.flushPendingHistory() saves it to
+     * watch history after the next login, and the #watch link reopens it.
+     */
+    onSessionExpired() {
+        this.retry.cancel();
+        const body = this.progressBody();
+        if (body) {
+            try {
+                localStorage.setItem(Session.PENDING_HISTORY_KEY, JSON.stringify({
+                    userId: window.app?.currentUser?.id, at: Date.now(), body
+                }));
+            } catch { /* storage blocked */ }
         }
-        this.retryCount++;
-        const delay = 1000 * 2 ** (this.retryCount - 1);
-        const seq = this.loadSeq;
-        const resumeAt = this.video?.currentTime || 0;
-        console.warn(`[WatchPage] ${reason} - retry ${this.retryCount}/${MAX_RETRIES} in ${delay}ms`);
-        this.showLoading();
-        this.retryTimer = setTimeout(() => {
-            this.retryTimer = null;
-            if (seq !== this.loadSeq) return; // something else started or stopped
-            if (resumeAt > 0) this.resumeTime = resumeAt;
-            this.reload();
-        }, delay);
+        this.video?.pause();
+        this.hideLoading();
     }
 
     /**
@@ -1308,7 +1385,7 @@ class WatchPage {
             this.closeAudioMenu();
             return;
         }
-        const pos = this.video?.currentTime || 0;
+        const pos = this.position();
         console.log(`[WatchPage] Switching audio track ${this.selectedAudioTrack} -> ${trackId} @ ${pos}s`);
         this.selectedAudioTrack = trackId;
         this.closeAudioMenu();
@@ -1917,15 +1994,28 @@ class WatchPage {
     }
 
     async saveProgress() {
-        if (!this.content || !this.video || this.video.paused) return;
-
-        const progress = Math.floor(this.video.currentTime);
-        const duration = Math.floor(this.video.duration);
-
-        if (isNaN(progress) || isNaN(duration) || duration <= 0) return;
-
+        if (!this.content || !this.video || this.video.paused || Session.expired) return;
+        const body = this.progressBody();
+        if (!body) return;
         try {
-            const data = {
+            await window.API.request('POST', '/history', body);
+        } catch (err) {
+            console.warn('[History] Failed to save progress:', err);
+        }
+    }
+
+    /** The POST /api/history body for where playback is now, or null */
+    progressBody() {
+        if (!this.content || !this.video) return null;
+
+        // While a retry is pending the element is empty: use where it stopped
+        const stoppedAt = this.retry.key === this.retryKey() ? this.retryResumeAt : 0;
+        const progress = Math.floor(this.position() || stoppedAt || 0);
+        const duration = Math.floor(this.totalDuration());
+
+        if (!progress || isNaN(progress) || isNaN(duration) || duration <= 0) return null;
+
+        const data = {
                 title: this.content.title || 'Unknown Title',
                 subtitle: this.content.subtitle || (this.content.type === 'movie' ? 'Movie' : 'Series'),
                 poster: this.content.poster,
@@ -1939,17 +2029,14 @@ class WatchPage {
                 direct: this.direct?.confirmed ? { providerId: this.direct.providerId, streamId: this.direct.streamId } : null
             };
 
-            await window.API.request('POST', '/history', {
-                id: this.content.id,
-                type: this.content.type === 'movie' ? 'movie' : 'episode',
-                sourceId: this.content.sourceId,
-                progress,
-                duration,
-                data
-            });
-        } catch (err) {
-            console.warn('[History] Failed to save progress:', err);
-        }
+        return {
+            id: this.content.id,
+            type: this.content.type === 'movie' ? 'movie' : 'episode',
+            sourceId: this.content.sourceId,
+            progress,
+            duration,
+            data
+        };
     }
 }
 

@@ -31,6 +31,77 @@ document.addEventListener('error', (e) => {
     else if (img.getAttribute('src') !== fallback) img.src = fallback;
 }, true);
 
+/**
+ * The login session as the page sees it. The server renews the login cookie
+ * while it is used (server/auth.js); when it ends anyway (logged out
+ * elsewhere, password changed, 30 days idle) Session.expire() fires
+ * 'fleurbox:session-expired' once - players stash their position for
+ * after the login (WatchPage) - and shows a "log in again" notice.
+ */
+const Session = {
+    expired: false,
+    AFTER_LOGIN_KEY: 'fleurbox_after_login',
+    PENDING_HISTORY_KEY: 'fleurbox_pending_history',
+
+    expire() {
+        if (this.expired) return;
+        this.expired = true;
+        console.warn('[Session] Login expired');
+        try { window.dispatchEvent(new CustomEvent('fleurbox:session-expired')); } catch (e) { console.error(e); }
+        try { sessionStorage.setItem(this.AFTER_LOGIN_KEY, window.location.hash || ''); } catch { /* storage blocked */ }
+        this.showNotice();
+    },
+
+    showNotice() {
+        if (document.getElementById('session-expired')) return;
+        const box = document.createElement('div');
+        box.id = 'session-expired';
+        box.className = 'session-expired';
+        box.setAttribute('role', 'alertdialog');
+        box.innerHTML = `
+            <div class="session-expired-card">
+                <h2>Session expired</h2>
+                <p>You were logged out. Log in again to carry on where you left off.</p>
+                <button type="button" class="btn btn-primary">Log in again</button>
+            </div>`;
+        box.querySelector('button').addEventListener('click', () => window.location.replace('/login.html'));
+        document.body.appendChild(box);
+    },
+
+    /**
+     * Is the login still good? true, false (401: expire() was called), or
+     * null when the server can't be reached (network down, server restarting)
+     */
+    async check() {
+        if (this.expired) return false;
+        try {
+            const res = await fetch('/api/auth/me', { cache: 'no-store' });
+            if (res.status === 401) {
+                this.expire();
+                return false;
+            }
+            return res.ok ? true : null;
+        } catch {
+            return null;
+        }
+    },
+
+    /** Progress saved while logged out (WatchPage): send it now that we're back */
+    async flushPendingHistory() {
+        let pending = null;
+        try {
+            pending = JSON.parse(localStorage.getItem(this.PENDING_HISTORY_KEY) || 'null');
+            localStorage.removeItem(this.PENDING_HISTORY_KEY);
+        } catch { return; }
+        if (!pending?.body) return;
+        // Only for the account that watched it, and not days later
+        if (pending.userId !== window.app?.currentUser?.id || Date.now() - pending.at > 7 * 24 * 3600 * 1000) return;
+        await API.request('POST', '/history', pending.body)
+            .catch(err => console.warn('[Session] Saved progress not sent:', err.message));
+    }
+};
+window.Session = Session;
+
 const API = {
     /**
      * True when this HTTPS page would have to load a plain-http URL, which
@@ -81,10 +152,11 @@ const API = {
         }
 
         if (!response.ok) {
-            // If unauthorized, redirect to login
+            // The login ended: say so (players save their place first)
+            // instead of jumping to the login page mid-whatever
             if (response.status === 401) {
-                window.location.href = '/login.html';
-                return;
+                Session.expire();
+                throw new Error('Session expired');
             }
             throw new Error(result.error || `Server responded with ${response.status}`);
         }

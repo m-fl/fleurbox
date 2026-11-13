@@ -74,7 +74,13 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
         // The server set the login cookie; nothing to store here
         // Redirect to main app (replace history to prevent back button issues)
-        window.location.replace('/');
+        // Back to what was open when the session expired (js/api.js Session)
+        let back = '';
+        try {
+            back = sessionStorage.getItem('fleurbox_after_login') || '';
+            sessionStorage.removeItem('fleurbox_after_login');
+        } catch { /* storage blocked */ }
+        window.location.replace('/' + (/^#[\w\-/%.:=&?]*$/.test(back) ? back : ''));
 
     } catch (err) {
         errorMessage.textContent = err.message;

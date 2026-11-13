@@ -205,12 +205,14 @@ class TranscodeSession extends EventEmitter {
             '-reconnect_delay_max', '3'
         );
 
-        args.push(...FFMPEG_PROTOCOLS, '-i', this.url);
-
-        // Add seek offset if specified (as output option to avoid Range requests)
+        // Seek as an input option so FFmpeg jumps there with a Range request.
+        // As an output option it reads and discards everything before the
+        // offset, which on a 2h+ resume blows past the waitForPlaylist timeout.
         if (this.options.seekOffset > 0) {
             args.push('-ss', String(this.options.seekOffset));
         }
+
+        args.push(...FFMPEG_PROTOCOLS, '-i', this.url);
 
         // Map streams
         args.push('-map', '0:v:0');

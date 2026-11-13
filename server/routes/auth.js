@@ -255,12 +255,11 @@ router.post('/login', loginLimit, (req, res, next) => {
  */
 router.post('/logout', async (req, res) => {
     const payload = auth.verifyToken(auth.tokenFromRequest(req));
-    if (payload?.jti) {
-        try {
-            await db.revokedTokens.add(payload.jti, payload.exp);
-        } catch (err) {
-            console.error('Error revoking token:', err);
-        }
+    try {
+        // This token and every renewal of it (sliding session)
+        await auth.revokeSession(payload, db.revokedTokens);
+    } catch (err) {
+        console.error('Error revoking token:', err);
     }
     auth.clearAuthCookie(res);
     res.json({ success: true, message: 'Logged out successfully' });
@@ -474,7 +473,7 @@ router.post('/profiles/:id/switch', auth.requireAuth, profileRoute(async (req, r
     const { user, account } = await profiles.checkSwitch(req.user, req.params.id, req.body?.pin);
     // The old profile's token stops working: one profile per browser at a time
     const old = auth.verifyToken(auth.tokenFromRequest(req));
-    if (old?.jti) await db.revokedTokens.add(old.jti, old.exp).catch(err => console.error('Error revoking token:', err));
+    await auth.revokeSession(old, db.revokedTokens).catch(err => console.error('Error revoking token:', err));
     auth.setAuthCookie(req, res, auth.generateToken(user, account));
     return { success: true, id: user.id };
 }));
